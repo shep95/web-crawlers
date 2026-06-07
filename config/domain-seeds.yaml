@@ -1,0 +1,49 @@
+# Trusted whitelist — the only gate for what Aureon may learn from via OmniSpider.
+# Keys match Aureon taxonomy slugs (domain, subdomain, or micro-subdomain).
+# Bridge resolves dotted paths (e.g. humanities.history.ancient_history) to the nearest key.
+
+physics:
+  seeds:
+    - https://arxiv.org/
+    - https://pubmed.ncbi.nlm.nih.gov/
+
+history:
+  seeds:
+    - https://www.britannica.com/
+    - https://www.worldhistory.org/
+
+artificial_intelligence:
+  seeds:
+    - https://arxiv.org/
+    - https://paperswithcode.com/
+
+computer_science:
+  seeds:
+    - https://www.britannica.com/
+    - https://arxiv.org/
+    - https://paperswithcode.com/
+
+biology:
+  seeds:
+    - https://pubmed.ncbi.nlm.nih.gov/
+    - https://www.britannica.com/
+
+mathematics:
+  seeds:
+    - https://arxiv.org/
+    - https://www.britannica.com/
+
+humanities:
+  seeds:
+    - https://www.britannica.com/
+    - https://www.worldhistory.org/
+
+science_and_natural_philosophy:
+  seeds:
+    - https://arxiv.org/
+    - https://pubmed.ncbi.nlm.nih.gov/
+    - https://www.britannica.com/
+
+default:
+  seeds:
+    - https://www.britannica.com/

@@ -1,8 +1,11 @@
 import Fastify from "fastify";
 import type { Role } from "./core/models.js";
 import type { AppConfig } from "./core/config.js";
+import { allowedDomainsFromSeeds, loadDomainSeeds, resolveDomainSeeds } from "./core/domain-seeds.js";
 import { Orchestrator } from "./core/orchestrator.js";
 import { buildSecurityStack } from "./security/nomad.js";
+import { handleChat } from "./chat/chat-service.js";
+import { pagesToLiveDocuments } from "./chat/live-data-policy.js";
 import { formatReportText, runTopicLookup } from "./topic/index.js";
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -85,6 +88,14 @@ export async function startApi(config: AppConfig, host: string, port: number): P
     },
   );
 
+  app.get("/v1/domain-seeds", async () => loadDomainSeeds());
+
+  app.get<{ Params: { domain: string } }>("/v1/domain-seeds/:domain", async (req, reply) => {
+    const seeds = resolveDomainSeeds(req.params.domain);
+    if (!seeds.length) return reply.code(404).send({ error: "No seeds for domain" });
+    return { domain: req.params.domain, seeds, allowedDomains: allowedDomainsFromSeeds(seeds) };
+  });
+
   app.post<{ Body: Record<string, unknown> }>("/v1/jobs", async (req, reply) => {
     const body = req.body ?? {};
     const seeds = body.seeds as string[] | undefined;
@@ -99,8 +110,103 @@ export async function startApi(config: AppConfig, host: string, port: number): P
         jsRendering: !!body.jsRendering,
         topic: (body.topic as string) ?? null,
         topicFollowRelated: !!body.topic,
+        allowedDomains: (body.allowedDomains as string[] | null) ?? allowedDomainsFromSeeds(seeds),
       });
       return reply.code(202).send(job);
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /** Algorithm chatbot — always crawls live web; never test files or archive snapshots. */
+  app.post<{ Body: Record<string, unknown> }>("/api/chat", async (req, reply) => {
+    const body = req.body ?? {};
+    const message = String(body.message ?? body.question ?? "").trim();
+    if (!message) return reply.code(400).send({ error: "message required" });
+    const domain = String(body.domain ?? "").trim();
+    const seeds = Array.isArray(body.seeds) ? (body.seeds as string[]) : undefined;
+    if (!domain && !seeds?.length) {
+      return reply.code(400).send({ error: "domain or seeds required — chat always uses live crawl data" });
+    }
+    try {
+      const result = await handleChat(config, orchestrator, {
+        message,
+        sessionId: body.sessionId ? String(body.sessionId) : undefined,
+        domain: domain || undefined,
+        seeds,
+        maxDepth: body.maxDepth != null ? Number(body.maxDepth) : undefined,
+        maxPages: body.maxPages != null ? Number(body.maxPages) : undefined,
+        timeoutMs: body.timeoutMs != null ? Number(body.timeoutMs) : undefined,
+      });
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith("CRAWL_INCOMPLETE:")) {
+        return reply.code(504).send({ error: "CRAWL_INCOMPLETE", status: msg.split(":")[1] });
+      }
+      if (msg.startsWith("LIVE_") || msg.startsWith("BLOCKED_")) {
+        return reply.code(400).send({ error: msg.split(" — ")[0], detail: msg });
+      }
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  /** Aureon bridge — topic + domain resolves whitelisted seeds; live web pages only. */
+  app.post<{ Body: Record<string, unknown> }>("/api/crawl", async (req, reply) => {
+    const body = req.body ?? {};
+    const topic = String(body.topic ?? body.question ?? "").trim();
+    const domain = String(body.domain ?? "").trim();
+    if (!topic) return reply.code(400).send({ error: "topic required" });
+    const seeds =
+      (body.seeds as string[] | undefined)?.filter(Boolean) ??
+      (domain ? resolveDomainSeeds(domain) : []);
+    if (!seeds.length) {
+      return reply.code(400).send({ error: "seeds required (provide seeds or domain)" });
+    }
+    const timeoutMs = Number(body.timeoutMs ?? 120_000);
+    const pollMs = Number(body.pollMs ?? 1500);
+    const maxDepth = Number(body.maxDepth ?? 2);
+    const maxPages = Number(body.maxPages ?? 25);
+    try {
+      const job = await orchestrator.submitJob({
+        seeds,
+        maxDepth,
+        maxPages,
+        includeArchive: false,
+        includeSitemaps: body.includeSitemaps !== false,
+        jsRendering: !!body.jsRendering,
+        topic,
+        topicFollowRelated: true,
+        allowedDomains: allowedDomainsFromSeeds(seeds),
+      });
+      const finished = await orchestrator.waitForJob(job.id, { timeoutMs, pollMs });
+      if (!finished || finished.status !== "completed") {
+        return reply.code(504).send({
+          error: "CRAWL_INCOMPLETE",
+          jobId: job.id,
+          status: finished?.status ?? "unknown",
+        });
+      }
+      const pages = orchestrator.listPagesWithText(
+        job.id,
+        Number(body.pageLimit ?? 50),
+        0,
+      );
+      const livePages = pagesToLiveDocuments(pages);
+      const documents = livePages.map((p) => ({
+        text: p.text,
+        url: p.url,
+        title: p.title,
+        source: "live",
+        fetchedAt: p.fetchedAt,
+      }));
+      return {
+        jobId: job.id,
+        domain: domain || null,
+        topic,
+        livePageCount: documents.length,
+        documents,
+      };
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -112,14 +218,27 @@ export async function startApi(config: AppConfig, host: string, port: number): P
     if (!job) return reply.code(404).send({ error: "Job not found" });
     return job;
   });
-  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string; includeText?: string } }>(
     "/v1/jobs/:id/pages",
     async (req) => {
-      return orchestrator.listPages(
-        req.params.id,
-        Number(req.query.limit ?? 100),
-        Number(req.query.offset ?? 0),
-      );
+      const limit = Number(req.query.limit ?? 100);
+      const offset = Number(req.query.offset ?? 0);
+      if (req.query.includeText === "1" || req.query.includeText === "true") {
+        return orchestrator.listPagesWithText(req.params.id, limit, offset);
+      }
+      return orchestrator.listPages(req.params.id, limit, offset);
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string; includeText?: string } }>(
+    "/api/jobs/:id/pages",
+    async (req) => {
+      const limit = Number(req.query.limit ?? 100);
+      const offset = Number(req.query.offset ?? 0);
+      if (req.query.includeText === "1" || req.query.includeText === "true") {
+        return orchestrator.listPagesWithText(req.params.id, limit, offset);
+      }
+      return orchestrator.listPages(req.params.id, limit, offset);
     },
   );
 

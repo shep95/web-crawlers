@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import pino from "pino";
 import type { AppConfig } from "./config.js";
 import type { CrawlJob, CrawlJobSpec, CrawlStatus, EngineType, FetchResult, FrontierEntry, PageRecord } from "./models.js";
@@ -28,6 +29,7 @@ import {
   scorePage,
   shouldFollowTopicLink,
 } from "../topic/index.js";
+import { extractPlainText } from "./text-extract.js";
 
 const log = pino({ name: "orchestrator" });
 
@@ -94,6 +96,47 @@ export class Orchestrator {
 
   listPages(jobId: string, limit = 100, offset = 0): PageRecord[] {
     return this.storage.listPages(jobId, limit, offset);
+  }
+
+  listPagesWithText(
+    jobId: string,
+    limit = 100,
+    offset = 0,
+  ): Array<PageRecord & { text: string }> {
+    const pages = this.storage.listPages(jobId, limit, offset);
+    const out: Array<PageRecord & { text: string }> = [];
+    for (const page of pages) {
+      let text = "";
+      if (page.contentPath && existsSync(page.contentPath)) {
+        try {
+          text = extractPlainText(readFileSync(page.contentPath, "utf8"));
+        } catch {
+          text = "";
+        }
+      }
+      if (text.length >= 80) {
+        out.push({ ...page, text });
+      }
+    }
+    return out;
+  }
+
+  async waitForJob(
+    jobId: string,
+    opts: { timeoutMs?: number; pollMs?: number } = {},
+  ): Promise<CrawlJob | null> {
+    const timeoutMs = opts.timeoutMs ?? 120_000;
+    const pollMs = opts.pollMs ?? 1500;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const job = this.getJob(jobId);
+      if (!job) return null;
+      if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+        return job;
+      }
+      await sleep(pollMs);
+    }
+    return this.getJob(jobId);
   }
 
   enqueueEntries(jobId: string, entries: FrontierEntry[]): void {

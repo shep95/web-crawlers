@@ -14,6 +14,8 @@ import {
 } from "./topic/intelligence.js";
 import { ArchiveEngine } from "./engines/registry.js";
 import { startApi } from "./api.js";
+import { handleChat, resetChatSessions } from "./chat/chat-service.js";
+import { createInterface } from "node:readline/promises";
 
 const program = new Command();
 
@@ -127,6 +129,57 @@ program
       return;
     }
     for (const ts of snapshots) console.log(`${ts}  ${archive.waybackUrl(ts, url)}`);
+  });
+
+program
+  .command("chat")
+  .description("Algorithm chatbot — always crawls live web (never test files or archive data)")
+  .requiredOption("-d, --domain <slug>", "Aureon domain slug for whitelisted live seeds")
+  .option("-s, --seed <url...>", "Override with explicit https seed URLs")
+  .option("-c, --config <path>", "Config path")
+  .action(async (opts) => {
+    const config = loadConfig(opts.config);
+    const security = config.security.enabled ? buildSecurityStack(config) : null;
+    const orchestrator = new Orchestrator(config, security);
+    orchestrator.init();
+    resetChatSessions();
+
+    console.log("Omnispider algorithm chatbot (live web only)");
+    console.log("Corpus is always freshly crawled — never test files or local reports.\n");
+
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let sessionId: string | undefined;
+
+    try {
+      while (true) {
+        const message = (await rl.question("You: ")).trim();
+        if (!message) continue;
+        if (/^(quit|exit|bye)$/i.test(message)) {
+          console.log("Bot: Goodbye. It was good talking with you.");
+          break;
+        }
+
+        try {
+          const result = await handleChat(config, orchestrator, {
+            message,
+            sessionId,
+            domain: opts.domain,
+            seeds: opts.seed,
+          });
+          sessionId = result.sessionId;
+          console.log(`Bot [${result.mode}]: ${result.reply}`);
+          if (result.sources.length) {
+            console.log(`     Source: ${result.sources[0].title} — ${result.sources[0].url}`);
+          }
+          console.log(`     Live pages: ${result.livePageCount} | ${result.disclaimer}\n`);
+        } catch (err) {
+          console.error(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+    } finally {
+      rl.close();
+      orchestrator.shutdown();
+    }
   });
 
 program

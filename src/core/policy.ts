@@ -160,7 +160,7 @@ export class CrawlPolicy {
       const ok = opts.allowedDomains.some(
         (d) => host === d || host.endsWith(`.${d}`),
       );
-      if (!ok && !this.config.policy.followExternalLinks) {
+      if (!ok) {
         return { allowed: false, reason: "domain_not_allowed" };
       }
     }
