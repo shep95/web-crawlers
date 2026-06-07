@@ -1,0 +1,63 @@
+# Omnispider default configuration
+# Temporal + global coverage via archive sources and broad seed discovery.
+
+orchestrator:
+  max_concurrency: 16
+  max_depth: 5
+  max_pages_per_job: 10000
+  request_timeout_seconds: 30
+  retry_attempts: 3
+  user_agent: "Omnispider/0.1 (+https://github.com/omnispider; respectful crawler)"
+
+policy:
+  respect_robots_txt: true
+  rate_limit_per_host: 2.0  # requests per second
+  allowed_schemes: ["http", "https"]
+  follow_external_links: true
+  blocked_domains: []
+
+engines:
+  default: http
+  routing:
+    js_heavy: playwright
+    archive: archive
+    fast_discovery: katana
+    forms: mechanical
+  playwright:
+    headless: true
+    wait_until: networkidle
+  splash:
+    base_url: "http://127.0.0.1:8050"
+  katana:
+    binary: "katana"
+    extra_args: ["-silent", "-nc"]
+
+discovery:
+  sitemap: true
+  robots: true
+  link_extraction: true
+  global_seeds:
+    - "https://www.wikipedia.org/"
+    - "https://www.reddit.com/"
+    - "https://news.ycombinator.com/"
+  cc_tld_seeds: false
+
+archive:
+  enabled: true
+  wayback_cdx_url: "https://web.archive.org/cdx/search/cdx"
+  wayback_render_url: "https://web.archive.org/web"
+  common_crawl_index: "https://index.commoncrawl.org/collinfo.json"
+  max_snapshots_per_url: 10
+
+storage:
+  database_path: "./data/omnispider.db"
+  content_dir: "./data/content"
+  store_html: true
+  store_metadata: true
+
+api:
+  host: "127.0.0.1"
+  port: 8080
+
+vendors:
+  path: "./vendors"
