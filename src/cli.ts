@@ -7,8 +7,11 @@ import { buildSecurityStack, ApiKeyRegistry } from "./security/nomad.js";
 import {
   formatReportText,
   runTopicLookup,
-  saveReport,
 } from "./topic/index.js";
+import {
+  saveIntelligenceReport,
+  defaultReportPaths,
+} from "./topic/intelligence.js";
 import { ArchiveEngine } from "./engines/registry.js";
 import { startApi } from "./api.js";
 
@@ -62,31 +65,52 @@ program
 
 program
   .command("lookup")
-  .description("Topic-centric lookup — find and follow pages about a person/topic")
-  .argument("<topic>", "Topic query")
-  .option("-s, --seed <url...>", "Extra seed URLs")
-  .option("-d, --depth <n>", "Max depth", "2")
-  .option("-m, --max-pages <n>", "Max pages", "40")
-  .option("--min-relevance <n>", "Min relevance score", "0.12")
-  .option("--waves <n>", "Follow-up profile waves", "2")
-  .option("--json <path>", "Save JSON report")
+  .description(
+    "Search a topic → crawl connected pages → gather data → repeat until no links left → intelligence report",
+  )
+  .argument("<topic>", "Topic query (person, place, keywords)")
+  .option("-s, --seed <url...>", "Direct seed URLs (recommended for people lookup)")
+  .option("-d, --depth <n>", "Max link hops from each page", "8")
+  .option("-m, --max-pages <n>", "Safety cap on pages (0 = config max)", "0")
+  .option("--min-relevance <n>", "Min relevance to include in report", "0.08")
+  .option("--no-archive", "Skip Wayback historical pass")
+  .option("--no-exhaustive", "Stop early instead of draining all connected links")
+  .option("--mode <mode>", "Search type: people (human), knowledge (domain), auto (detect)", "auto")
+  .option("--no-linked-persons", "Skip spawning agents for co-residents / household members")
+  .option("--max-linked-persons <n>", "Max co-resident agent lookups (default 3)", "3")
+  .option("--json <path>", "JSON intelligence file (default: data/reports/<topic>-intelligence.json)")
+  .option("--report <path>", "Markdown intelligence file (default: data/reports/<topic>-intelligence.md)")
   .option("-c, --config <path>", "Config path")
   .action(async (topic: string, opts) => {
     const config = loadConfig(opts.config);
     const security = config.security.enabled ? buildSecurityStack(config) : null;
+    const defaults = defaultReportPaths(topic);
+    const maxPages = Number(opts.maxPages);
+
     const report = await runTopicLookup(config, security, {
       topic,
       extraSeeds: opts.seed ?? [],
       maxDepth: Number(opts.depth),
-      maxPages: Number(opts.maxPages),
+      maxPages: maxPages === 0 ? 0 : maxPages,
       minRelevance: Number(opts.minRelevance),
-      followWaves: Number(opts.waves),
+      exhaustive: opts.exhaustive !== false,
+      includeArchive: opts.archive !== false,
+      searchMode: opts.mode as "people" | "knowledge" | "auto",
+      linkedDepth: opts.linkedPersons === false ? 0 : 1,
+      maxLinkedPersons: Number(opts.maxLinkedPersons),
+      onProgress: (msg) => console.error(`[omnispider] ${msg}`),
     });
+
     console.log(formatReportText(report));
-    if (opts.json) {
-      saveReport(report, resolve(opts.json));
-      console.log(`\nJSON report saved to ${opts.json}`);
-    }
+
+    const jsonPath = resolve(opts.json ?? defaults.json);
+    const mdPath = resolve(opts.report ?? defaults.markdown);
+    saveIntelligenceReport(report, jsonPath, mdPath);
+    console.log(`\nIntelligence files written:`);
+    console.log(`  JSON:     ${jsonPath}`);
+    console.log(`  Markdown: ${mdPath}`);
+    console.log(`  Sources:  ${report.sourceLinks.length} URLs crawled, ${report.relevantPages} with extracted data`);
+    console.log(`  Type:     ${report.searchMode} search (${report.searchModeReason})`);
   });
 
 program

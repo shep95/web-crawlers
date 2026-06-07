@@ -82,6 +82,44 @@ export class ArchiveEngine implements Engine {
       collapse: "timestamp:8",
       limit: String(this.config.archive.maxSnapshotsPerUrl),
     });
+    const rows = await this.queryCdxRows(params);
+    return rows.map((r) => r[0]).filter(Boolean);
+  }
+
+  /** CDX wildcard search — returns original URLs captured in Wayback. */
+  async searchCapturedUrls(urlPattern: string, limit = 30): Promise<string[]> {
+    const params = new URLSearchParams({
+      url: urlPattern,
+      output: "json",
+      fl: "timestamp,original,statuscode",
+      filter: "statuscode:200",
+      collapse: "original",
+      limit: String(limit),
+    });
+    const rows = await this.queryCdxRows(params);
+    return [...new Set(rows.map((r) => r[1]).filter(Boolean))];
+  }
+
+  /** Returns [timestamp, original] pairs for a URL pattern. */
+  async searchSnapshots(
+    urlPattern: string,
+    limit = 20,
+  ): Promise<Array<{ timestamp: string; original: string }>> {
+    const params = new URLSearchParams({
+      url: urlPattern,
+      fl: "timestamp,original,statuscode",
+      filter: "statuscode:200",
+      collapse: "timestamp:8",
+      limit: String(limit),
+      output: "json",
+    });
+    const rows = await this.queryCdxRows(params);
+    return rows
+      .map((r) => ({ timestamp: r[0], original: r[1] }))
+      .filter((r) => r.timestamp && r.original);
+  }
+
+  private async queryCdxRows(params: URLSearchParams): Promise<string[][]> {
     try {
       const resp = await fetch(`${this.config.archive.waybackCdxUrl}?${params}`, {
         signal: AbortSignal.timeout(this.config.orchestrator.requestTimeoutSeconds * 1000),
@@ -90,7 +128,7 @@ export class ArchiveEngine implements Engine {
       if (!resp.ok) return [];
       const rows = (await resp.json()) as string[][];
       if (!rows || rows.length < 2) return [];
-      return rows.slice(1).map((r) => r[0]).filter(Boolean);
+      return rows.slice(1);
     } catch {
       return [];
     }

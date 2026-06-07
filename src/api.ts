@@ -68,16 +68,18 @@ export async function startApi(config: AppConfig, host: string, port: number): P
 
   app.get("/organism/vitals", async () => security?.vitalGuard.getVitalsReport() ?? {});
 
-  app.post<{ Body: { topic: string; seeds?: string[]; maxDepth?: number; maxPages?: number } }>(
+  app.post<{ Body: { topic: string; seeds?: string[]; maxDepth?: number; maxPages?: number; exhaustive?: boolean } }>(
     "/v1/lookup",
     async (req, reply) => {
-      const { topic, seeds, maxDepth, maxPages } = req.body ?? {};
+      const { topic, seeds, maxDepth, maxPages, exhaustive } = req.body ?? {};
       if (!topic) return reply.code(400).send({ error: "topic required" });
       const report = await runTopicLookup(config, security, {
         topic,
         extraSeeds: seeds ?? [],
-        maxDepth: maxDepth ?? 2,
-        maxPages: maxPages ?? 40,
+        maxDepth: maxDepth ?? 5,
+        maxPages: maxPages ?? 500,
+        exhaustive: exhaustive !== false,
+        includeArchive: true,
       });
       return { report, text: formatReportText(report) };
     },

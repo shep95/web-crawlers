@@ -1,12 +1,62 @@
 import type { TopicPageIntel, TopicReport, PageRecord } from "../core/models.js";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import * as cheerio from "cheerio";
+import { extractPeopleDataFromText } from "./people-intel.js";
 
 const STOPWORDS = new Set(["a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "about"]);
 const LOCATION_TERMS = new Set([
-  "florida", "coral", "cape", "california", "texas", "united", "states", "newton", "shepherd",
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+  "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
+  "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+  "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "hampshire",
+  "jersey", "mexico", "york", "carolina", "dakota", "ohio", "oklahoma", "oregon",
+  "pennsylvania", "rhode", "tennessee", "texas", "utah", "vermont", "virginia",
+  "washington", "wisconsin", "wyoming", "united", "states", "usa", "county", "city",
 ]);
-const SOCIAL_DOMAINS = ["github.com", "x.com", "twitter.com", "linkedin.com", "instagram.com", "discord.gg"];
+const SOCIAL_DOMAINS = [
+  "github.com",
+  "x.com",
+  "twitter.com",
+  "linkedin.com",
+  "instagram.com",
+  "facebook.com",
+  "tiktok.com",
+  "youtube.com",
+  "threads.net",
+  "discord.gg",
+];
+
+/** Site chrome / nav URLs that are never topic-connected. */
+const NOISE_URL_PATTERNS = [
+  /github\.com\/(?:features|marketplace|mcp|security|enterprise|team|solutions|resources|customer-stories|orgs|trust-center|partners|sponsors|accelerator|topics|why-github|login|signup|search|settings|explore|pricing|about|contact|site|trending|premium-support|user-attachments)/i,
+  /github\.com\/collections/i,
+  /x\.com\/(?:home|explore|login|i\/flow)/i,
+];
+
+export function isTopicNoiseUrl(url: string): boolean {
+  const l = url.toLowerCase();
+  if (/\.(png|jpg|jpeg|svg|gif|ico|webp)(\?|$)/.test(l)) return true;
+  return NOISE_URL_PATTERNS.some((p) => p.test(l));
+}
+
+/** True when a discovered link should enter the crawl frontier for this topic. */
+export function shouldFollowTopicLink(
+  url: string,
+  anchor: string,
+  profile: TopicProfile,
+  minScore: number,
+): boolean {
+  if (isTopicNoiseUrl(url)) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (!SOCIAL_DOMAINS.some((d) => host.includes(d))) {
+      return scoreLink(url, anchor, profile) >= minScore + 0.05;
+    }
+  } catch {
+    return false;
+  }
+  return scoreLink(url, anchor, profile) >= minScore;
+}
 
 export class TopicProfile {
   readonly raw: string;
@@ -145,6 +195,7 @@ export function extractProfileUrlsFromHtml(html: string, baseUrl: string, profil
     if (!href) return;
     try {
       const link = new URL(href, baseUrl).toString();
+      if (isTopicNoiseUrl(link)) return;
       const host = new URL(link).hostname;
       if (!SOCIAL_DOMAINS.some((d) => host.includes(d))) return;
       const anchor = $(el).text().replace(/\s+/g, " ").trim();
@@ -159,10 +210,7 @@ export function extractProfileUrlsFromHtml(html: string, baseUrl: string, profil
 }
 
 function isValidSocialLink(link: string): boolean {
-  const l = link.toLowerCase();
-  if (/\.(png|jpg|svg|ico)|&quot/.test(l)) return false;
-  if (l.includes("github.com/features") || l.includes("github.com/marketplace")) return false;
-  return true;
+  return !isTopicNoiseUrl(link);
 }
 
 export function extractPageIntel(
@@ -186,10 +234,10 @@ export function extractPageIntel(
   const socialLinks = [
     ...new Set(
       (html.match(
-        /https?:\/\/(?:www\.)?(?:github\.com\/(?!.*\.(?:png|jpg|svg))[^/\s"'<>]+|x\.com\/[^\s"'<>]+|twitter\.com\/[^\s"'<>]+|linkedin\.com\/in\/[^\s"'<>]+|discord\.gg\/[^\s"'<>]+)/gi,
+        /https?:\/\/(?:www\.)?(?:github\.com\/(?!.*\.(?:png|jpg|svg))[^/\s"'<>]+|x\.com\/[^\s"'<>]+|twitter\.com\/[^\s"'<>]+|linkedin\.com\/in\/[^\s"'<>]+|instagram\.com\/[^\s"'<>]+|facebook\.com\/[^\s"'<>]+|tiktok\.com\/@[^\s"'<>]+|youtube\.com\/(?:@|c\/|user\/)[^\s"'<>]+|threads\.net\/@[^\s"'<>]+|discord\.gg\/[^\s"'<>]+)/gi,
       ) ?? []).filter(isValidSocialLink),
     ),
-  ].slice(0, 15);
+  ].slice(0, 20);
   let githubName: string | null = null;
   let githubBio: string | null = null;
   if (url.includes("github.com")) {
@@ -201,6 +249,11 @@ export function extractPageIntel(
     .get()
     .filter((t) => t.length < 200 && scoreText(t, profile) > 0)
     .slice(0, 8);
+  const emails = [
+    ...new Set((text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) ?? []).slice(0, 5)),
+  ];
+  const people = extractPeopleDataFromText(text);
+  for (const e of emails) if (!people.emails.includes(e)) people.emails.push(e);
   const snippets: string[] = [];
   for (const term of profile.terms) {
     if (term.length < 3) continue;
@@ -217,8 +270,21 @@ export function extractPageIntel(
     metaDescription: metaDesc,
     headings,
     socialLinks,
-    locations: [],
-    emails: [],
+    locations: [...new Set(people.locations)].slice(0, 10),
+    pastLocations: [...new Set(people.pastLocations)].slice(0, 10),
+    origins: [...new Set(people.origins)].slice(0, 10),
+    emails: [...new Set(people.emails)].slice(0, 8),
+    phones: [...new Set(people.phones)].slice(0, 8),
+    family: people.family.slice(0, 10),
+    connections: people.connections.slice(0, 15),
+    knowledgeDomains: [...new Set(people.knowledgeDomains)].slice(0, 15),
+    employment: people.employment.slice(0, 10),
+    pastEmployment: people.pastEmployment.slice(0, 10),
+    businesses: people.businesses.slice(0, 10),
+    government: [...new Set(people.government)].slice(0, 10),
+    workplaces: people.workplaces.slice(0, 10),
+    coworkers: people.coworkers.slice(0, 10),
+    compensation: [...new Set(people.compensation)].slice(0, 8),
     githubName,
     githubBio,
     profileItems,
@@ -274,13 +340,71 @@ export function buildTopicReport(
   };
 }
 
-export function formatReportText(report: TopicReport): string {
+export function formatReportText(report: TopicReport | import("../core/models.js").IntelligenceReport): string {
+  const intel = report as import("../core/models.js").IntelligenceReport;
   const lines = [
     `Topic: ${report.topic}`,
+    `Search type: ${intel.searchMode ?? "people"} (${intel.searchModeReason ?? ""})`,
     `Job: ${report.jobId}`,
     `Pages crawled: ${report.pagesCrawled} | Relevant: ${report.relevantPages}`,
-    "",
   ];
+  if (intel.executiveSummary) {
+    lines.push("", "Executive summary", intel.executiveSummary);
+  }
+  if (intel.keyFindings?.length) {
+    lines.push("", "Key findings");
+    for (const f of intel.keyFindings.slice(0, 8)) lines.push(`  • ${f}`);
+  }
+  if (intel.crawlStats) {
+    lines.push(
+      "",
+      `Crawl: ${intel.crawlStats.totalPages} pages (${intel.crawlStats.livePages} live, ${intel.crawlStats.archivePages} archive)`,
+    );
+    if (intel.crawlStats.saturated) lines.push("Status: all topic-connected links exhausted");
+  }
+  if (intel.sourceLinks?.length) {
+    lines.push(`Source index: ${intel.sourceLinks.length} URLs crawled`);
+  }
+  if (intel.peopleMap) {
+    const pm = intel.peopleMap;
+    lines.push("", "People intelligence map");
+    if (pm.locations.current.length) {
+      lines.push(`  Locations: ${pm.locations.current.slice(0, 4).map((e) => e.value).join("; ")}`);
+    }
+    if (pm.locations.past.length) {
+      lines.push(`  Past locations: ${pm.locations.past.slice(0, 4).map((e) => e.value).join("; ")}`);
+    }
+    if (pm.locations.origins.length) {
+      lines.push(`  Origins: ${pm.locations.origins.slice(0, 4).map((e) => e.value).join("; ")}`);
+    }
+    if (pm.phones.length) lines.push(`  Phones: ${pm.phones.map((e) => e.value).join(", ")}`);
+    if (pm.family.length) lines.push(`  Family: ${pm.family.slice(0, 4).map((e) => e.value).join("; ")}`);
+    if (pm.connections.length) {
+      lines.push(`  Connections: ${pm.connections.slice(0, 4).map((e) => e.value).join("; ")}`);
+    }
+    if (pm.knowledgeDomains.length) {
+      lines.push(`  Expertise: ${pm.knowledgeDomains.slice(0, 4).map((e) => e.value).join("; ")}`);
+    }
+    if (pm.employment.current.length) {
+      lines.push(`  Jobs: ${pm.employment.current.slice(0, 3).map((e) => e.value).join("; ")}`);
+    }
+    const st = pm.socialTrail;
+    if (st.profiles.length) {
+      lines.push(`  Social: ${st.profiles.slice(0, 4).map((p) => `${p.platform} ${p.profileUrl}`).join("; ")}`);
+    }
+    if (st.images.length) {
+      lines.push(`  Social images: ${st.images.length} (${st.persona.selfPresentation.selfImageCount} likely self)`);
+    }
+    if (pm.organizationMap.length) {
+      lines.push(
+        `  Orgs: ${pm.organizationMap.slice(0, 3).map((o) => `${o.name}${o.isLikelyOwnedBySubject ? " (owned)" : ""}`).join("; ")}`,
+      );
+    }
+    if (pm.temporal.inferences.length) {
+      lines.push(`  Job changes: ${pm.temporal.inferences.slice(0, 2).join("; ")}`);
+    }
+  }
+  lines.push("");
   if (report.aggregatedSocialLinks.length) {
     lines.push("Social / profile links");
     for (const l of report.aggregatedSocialLinks.slice(0, 15)) lines.push(`  - ${l}`);
@@ -292,6 +416,12 @@ export function formatReportText(report: TopicReport): string {
     if (p.title) lines.push(`  Title: ${p.title.slice(0, 140)}`);
     if (p.githubName) lines.push(`  GitHub name: ${p.githubName}`);
     if (p.githubBio) lines.push(`  GitHub bio: ${p.githubBio.slice(0, 160)}`);
+    if (p.knowledgeDomains?.length) {
+      lines.push(`  Expertise: ${p.knowledgeDomains.slice(0, 4).join(", ")}`);
+    }
+    if (p.employment?.length) {
+      lines.push(`  Employment: ${p.employment.slice(0, 2).map((j) => `${j.role} @ ${j.company}`).join("; ")}`);
+    }
     for (const item of p.profileItems.slice(0, 5)) lines.push(`  - ${item.slice(0, 120)}`);
     for (const s of p.snippets.slice(0, 2)) lines.push(`  > ${s.slice(0, 200)}`);
   }
@@ -315,81 +445,30 @@ export async function runTopicLookup(
     minLinkScore?: number;
     followWaves?: number;
     jsRendering?: boolean;
+    exhaustive?: boolean;
+    includeArchive?: boolean;
+    searchMode?: "people" | "knowledge" | "auto";
+    linkedDepth?: number;
+    maxLinkedPersons?: number;
+    linkedMaxPages?: number;
+    onProgress?: (message: string) => void;
   },
-): Promise<TopicReport> {
-  const { Orchestrator } = await import("../core/orchestrator.js");
-  const profile = TopicProfile.parse(opts.topic);
-  const orchestrator = new Orchestrator(config, security);
-  orchestrator.init();
-
-  try {
-    let seeds = buildTopicSeeds(profile, opts.extraSeeds ?? []);
-    const enriched = await enrichSeedsFromGithubSearch(profile, {
-      userAgent: config.orchestrator.userAgent,
-      timeoutMs: config.orchestrator.requestTimeoutSeconds * 1000,
-    });
-    seeds = [...new Set([...seeds, ...enriched])];
-    if (security) {
-      const blocked = new Set(security.ssrfGuard.validateMany(seeds).map((b) => b[0]));
-      seeds = seeds.filter((s) => !blocked.has(s));
-    }
-
-    const spec = {
-      seeds: seeds.slice(0, 20),
-      engine: "auto" as const,
-      maxDepth: opts.maxDepth ?? 2,
-      maxPages: opts.maxPages ?? 40,
-      includeArchive: false,
-      includeSitemaps: false,
-      jsRendering: opts.jsRendering ?? false,
-      topic: profile.raw,
-      topicMinLinkScore: opts.minLinkScore ?? 0.1,
-      topicMinRelevance: opts.minRelevance ?? 0.12,
-      topicFollowRelated: true,
-    };
-
-    let job = await orchestrator.submitJob(spec);
-    while (job.status === "running" || job.status === "pending") {
-      await sleep(500);
-      job = (await orchestrator.getJob(job.id))!;
-    }
-
-    let pages = orchestrator.listPages(job.id, 5000);
-
-    if ((opts.followWaves ?? 2) > 1) {
-      const report1 = buildTopicReport(profile, job.id, pages, job.pagesCrawled, opts.minRelevance);
-      const waveSeeds = report1.aggregatedSocialLinks
-        .filter((u) => /github\.com|x\.com|twitter\.com/.test(u))
-        .slice(0, 10);
-      if (waveSeeds.length) {
-        const waveJob = await orchestrator.submitJob({
-          ...spec,
-          seeds: waveSeeds,
-          maxDepth: 1,
-          maxPages: Math.min(20, opts.maxPages ?? 40),
-        });
-        let w = waveJob;
-        while (w.status === "running" || w.status === "pending") {
-          await sleep(500);
-          w = (await orchestrator.getJob(w.id))!;
-        }
-        pages = [...pages, ...orchestrator.listPages(w.id, 5000)];
-        return buildTopicReport(
-          profile,
-          job.id,
-          pages,
-          job.pagesCrawled + w.pagesCrawled,
-          opts.minRelevance,
-        );
-      }
-    }
-
-    return buildTopicReport(profile, job.id, pages, job.pagesCrawled, opts.minRelevance);
-  } finally {
-    orchestrator.shutdown();
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+): Promise<import("../core/models.js").IntelligenceReport> {
+  const { runIntelligenceLookup } = await import("./intelligence.js");
+  return runIntelligenceLookup(config, security, {
+    topic: opts.topic,
+    extraSeeds: opts.extraSeeds,
+    maxDepth: opts.maxDepth,
+    maxPages: opts.maxPages,
+    minRelevance: opts.minRelevance,
+    minLinkScore: opts.minLinkScore,
+    exhaustive: opts.exhaustive ?? true,
+    includeArchive: opts.includeArchive ?? true,
+    searchMode: opts.searchMode ?? "auto",
+    jsRendering: opts.jsRendering,
+    linkedDepth: opts.linkedDepth,
+    maxLinkedPersons: opts.maxLinkedPersons,
+    linkedMaxPages: opts.linkedMaxPages,
+    onProgress: opts.onProgress,
+  });
 }

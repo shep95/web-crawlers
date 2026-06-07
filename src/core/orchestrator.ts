@@ -23,8 +23,10 @@ import type { NomadSecurityStack } from "../security/nomad.js";
 import {
   TopicProfile,
   extractProfileUrlsFromHtml,
+  isTopicNoiseUrl,
   scoreLink,
   scorePage,
+  shouldFollowTopicLink,
 } from "../topic/index.js";
 
 const log = pino({ name: "orchestrator" });
@@ -94,6 +96,10 @@ export class Orchestrator {
     return this.storage.listPages(jobId, limit, offset);
   }
 
+  enqueueEntries(jobId: string, entries: FrontierEntry[]): void {
+    this.storage.enqueueFrontier(jobId, entries);
+  }
+
   private async runJob(job: CrawlJob, correlationId?: string): Promise<void> {
     job.status = "running";
     job.startedAt = new Date().toISOString();
@@ -152,26 +158,37 @@ export class Orchestrator {
       }
     }
 
+    if (job.extraFrontier?.length) {
+      entries.push(...job.extraFrontier);
+    }
+
     this.storage.enqueueFrontier(job.id, entries);
     log.info({ jobId: job.id, entries: entries.length }, "frontier_seeded");
+  }
+
+  private pageLimit(job: CrawlJob): number {
+    if (job.maxPages && job.maxPages > 0) return job.maxPages;
+    return this.config.orchestrator.maxPagesPerJob;
   }
 
   private async worker(job: CrawlJob): Promise<void> {
     const seedUrl = normalizeUrl(job.seeds[0]);
     let idleRounds = 0;
     const topicProfile = job.topic ? TopicProfile.parse(job.topic) : null;
+    const limit = this.pageLimit(job);
+    const maxIdle = job.exhaustive ? 30 : 6;
 
-    while (job.pagesCrawled < (job.maxPages ?? 1000)) {
+    while (job.pagesCrawled < limit) {
       const entry = this.storage.popFrontier(job.id);
       if (!entry) {
         idleRounds++;
-        if (idleRounds >= 6) break;
+        if (idleRounds >= maxIdle) break;
         await sleep(500);
         continue;
       }
       idleRounds = 0;
 
-      if (entry.depth > (job.maxDepth ?? 3)) {
+      if (entry.depth > (job.maxDepth ?? 3) && entry.source !== "wayback") {
         this.storage.markFrontierDone(job.id, entry.url, entry.archiveTimestamp ?? null);
         continue;
       }
@@ -202,7 +219,7 @@ export class Orchestrator {
         }
       }
 
-      if (job.pagesCrawled >= (job.maxPages ?? 1000)) break;
+      if (job.pagesCrawled >= limit) break;
 
       const page = await this.fetchAndProcess(job, entry, seedUrl, topicProfile);
       if (page) job.pagesCrawled++;
@@ -276,11 +293,14 @@ export class Orchestrator {
     };
     this.storage.savePage(job.id, page);
 
-    if (entry.depth < (job.maxDepth ?? 3) && entry.source === "live") {
+    if (entry.depth < (job.maxDepth ?? 3)) {
       const childEntries: FrontierEntry[] = [];
+      const linkCap = topicProfile && job.topicFollowRelated ? 500 : 200;
+      const enqueueCap = topicProfile && job.topicFollowRelated ? 400 : 250;
 
       if (topicProfile && job.topicFollowRelated) {
         for (const link of extractProfileUrlsFromHtml(html, result.finalUrl, topicProfile)) {
+          if (isTopicNoiseUrl(link)) continue;
           if (this.security && !this.security.ssrfGuard.validateUrl(link).ok) continue;
           childEntries.push({
             url: link,
@@ -289,10 +309,15 @@ export class Orchestrator {
             priority: 90 - entry.depth,
           });
         }
+        const pageIsRelevant =
+          topicRelevance !== undefined && topicRelevance >= (job.topicMinRelevance ?? 0.1);
+        const linkThreshold = pageIsRelevant
+          ? (job.topicMinLinkScore ?? 0.1) * 0.6
+          : (job.topicMinLinkScore ?? 0.1);
         for (const [link, anchor] of extractLinksWithText(html, result.finalUrl)) {
+          if (!shouldFollowTopicLink(link, anchor, topicProfile, linkThreshold)) continue;
           if (this.security && !this.security.ssrfGuard.validateUrl(link).ok) continue;
           const linkScore = scoreLink(link, anchor, topicProfile);
-          if (linkScore < (job.topicMinLinkScore ?? 0.1)) continue;
           childEntries.push({
             url: link,
             depth: entry.depth + 1,
@@ -301,7 +326,7 @@ export class Orchestrator {
           });
         }
       } else {
-        for (const link of links.slice(0, 200)) {
+        for (const link of links.slice(0, linkCap)) {
           if (this.security && !this.security.ssrfGuard.validateUrl(link).ok) continue;
           childEntries.push({
             url: link,
@@ -316,11 +341,12 @@ export class Orchestrator {
         childEntries.sort((a, b) => b.priority - a.priority);
         const seen = new Set<string>();
         const deduped = childEntries.filter((e) => {
-          if (seen.has(e.url)) return false;
-          seen.add(e.url);
+          const key = `${e.url}|${e.archiveTimestamp ?? ""}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
           return true;
         });
-        this.storage.enqueueFrontier(job.id, deduped.slice(0, 250));
+        this.storage.enqueueFrontier(job.id, deduped.slice(0, enqueueCap));
       }
     }
 

@@ -251,6 +251,8 @@ export function createJobFromSpec(id: string, spec: CrawlJobSpec): CrawlJob {
     topicMinLinkScore: spec.topicMinLinkScore ?? 0.1,
     topicMinRelevance: spec.topicMinRelevance ?? 0.12,
     topicFollowRelated: spec.topicFollowRelated ?? false,
+    exhaustive: spec.exhaustive ?? false,
+    extraFrontier: spec.extraFrontier ?? [],
     status: "pending",
     createdAt: new Date().toISOString(),
     pagesCrawled: 0,
