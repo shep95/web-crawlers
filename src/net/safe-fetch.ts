@@ -4,6 +4,8 @@ import type { Readable, Transform } from "node:stream";
 import { Agent, ProxyAgent, request, type Dispatcher } from "undici";
 import { checkUrl, isPublicAddress } from "./ip-guard.js";
 
+const noop = () => undefined;
+
 export const DEFAULT_USER_AGENT =
   "OmnispiderMetadataBot/2.0 (+https://github.com/shep95/web-crawlers; respects robots.txt)";
 
@@ -145,6 +147,9 @@ async function readCapped(
       size += buf.length;
     }
   } finally {
+    // Destroying an undici body emits 'error' (RequestAbortedError); a listener must exist
+    // or Node treats it as an unhandled stream error and terminates the process.
+    stream.on("error", noop);
     stream.destroy();
   }
   return { body: Buffer.concat(chunks), truncated, bytes: size };
@@ -163,6 +168,12 @@ function headerRecord(raw: Record<string, string | string[] | undefined>): Recor
  * Fetch a public URL with SSRF protection on every hop, manual redirect
  * handling, a wall-clock timeout, and decompression-bomb-safe byte caps.
  */
+/**
+ * Test-only escape hatch so integration tests can exercise the real fetch path
+ * against a loopback server. Never set from configuration or request input.
+ */
+export const __testing = { allowLoopback: false, dispatcher: null as Dispatcher | null };
+
 export async function safeFetch(rawUrl: string, opts: SafeFetchOptions = {}): Promise<SafeResponse> {
   const maxBytes = opts.maxBytes ?? 15 * 1024 * 1024;
   const maxRedirects = opts.maxRedirects ?? 6;
@@ -173,11 +184,11 @@ export async function safeFetch(rawUrl: string, opts: SafeFetchOptions = {}): Pr
     ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)])
     : AbortSignal.timeout(timeoutMs);
   const redirects: RedirectHop[] = [];
-  const disp = getDispatcher();
+  const disp = __testing.dispatcher ?? getDispatcher();
 
   let current = rawUrl;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const check = checkUrl(current);
+    const check = __testing.allowLoopback && /^http:\/\/127\.0\.0\.1:/.test(current) ? ({ ok: true, url: new URL(current) } as const) : checkUrl(current);
     if (!check.ok) throw new FetchBlockedError(check.reason, current);
     const res = await request(check.url, {
       method: opts.method ?? "GET",
@@ -194,6 +205,8 @@ export async function safeFetch(rawUrl: string, opts: SafeFetchOptions = {}): Pr
     });
     const ttfbMs = Date.now() - started;
     const headers = headerRecord(res.headers as Record<string, string | string[]>);
+    // Swallow the abort error that destroy() emits on purpose (see readCapped).
+    res.body.on("error", noop);
     if (res.statusCode >= 300 && res.statusCode < 400 && headers.location) {
       res.body.destroy();
       const next = new URL(headers.location, current).toString();
