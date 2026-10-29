@@ -1,12 +1,11 @@
 [build]
-builder = "nixpacks"
-buildCommand = "npm ci && npm run build"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "node dist/cli.js serve --host 0.0.0.0"
-restartPolicyType = "on_failure"
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-
-# Optional: add a second Railway service with cron schedule:
-#   schedule = "0 */6 * * *"
-#   startCommand = "node dist/cli.js deep-web sync-all"
+# One replica: the corpus is a single-writer SQLite database on the mounted volume (/data).
+numReplicas = 1

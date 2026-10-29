@@ -83,10 +83,10 @@ vendors:
 
 # Deep-web: auto-sync on Railway + push to frontend webhook (override via env).
 deep_web:
-  auto_sync: true
+  auto_sync: false
   sync_interval_hours: 6
-  uncensored: true
-  publish_full_text: true
+  uncensored: false
+  publish_full_text: false
   webhook_url: ""
   webhook_secret: ""
   frontend_deploy_hook: ""

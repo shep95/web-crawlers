@@ -14,8 +14,8 @@ export interface DeepWebConfig {
 const DEFAULT: DeepWebConfig = {
   autoSync: false,
   syncIntervalHours: 6,
-  uncensored: true,
-  publishFullText: true,
+  uncensored: false,
+  publishFullText: false,
   webhookUrl: "",
   webhookSecret: "",
   frontendDeployHook: "",

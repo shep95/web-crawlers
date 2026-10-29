@@ -1,0 +1,11 @@
+# Operator-managed bootstrap seeds for the autonomous crawler.
+# These are discovery inputs maintained by the system operator — end users never
+# supply URLs. Sitemaps and feeds are re-fetched on their interval; everything
+# they reference is retrieved, inspected and indexed by the crawler.
+seeds:
+  - { id: datagov_sitemap, url: "https://catalog.data.gov/sitemap.xml", type: sitemap, interval_hours: 24, priority: 55 }
+  - { id: ukdata_sitemap, url: "https://www.data.gov.uk/sitemap.xml", type: sitemap, interval_hours: 24, priority: 55 }
+  - { id: eurostat_feed, url: "https://ec.europa.eu/eurostat/en/web/main/news/euro-indicators/rss", type: feed, interval_hours: 12, priority: 55 }
+  - { id: nasa_feed, url: "https://www.nasa.gov/feed/", type: feed, interval_hours: 12, priority: 50 }
+  - { id: w3c_feed, url: "https://www.w3.org/news/feed/", type: feed, interval_hours: 24, priority: 45 }
+  - { id: schemaorg, url: "https://schema.org/docs/full.html", type: page, interval_hours: 168, priority: 40 }

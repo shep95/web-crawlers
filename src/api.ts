@@ -1,4 +1,8 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
+import fastifyStatic from "@fastify/static";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import type { Role } from "./core/models.js";
 import type { AppConfig } from "./core/config.js";
@@ -18,94 +22,125 @@ import {
 } from "./sources/corpus-index.js";
 import { ingestUrlsForDomain, ingestToChatDocuments } from "./sources/url-ingest.js";
 import { startDeepWebScheduler } from "./sync/deep-web-scheduler.js";
-import { formatReportText, runTopicLookup } from "./topic/index.js";
 import { prioritizeSeedsForQuestion } from "./chat/retrieval-ranker.js";
 
-const SECURITY_HEADERS: Record<string, string> = {
-  "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+import { registerV2 } from "./http/v2.js";
+import { registerCorpusRoutes } from "./http/corpus-routes.js";
+import { CorpusStore } from "./corpus/store.js";
+import { AutonomousCrawler } from "./corpus/crawler.js";
+import { ApiKeys, LatencyStats } from "./http/guards.js";
+import { getEgressMode } from "./net/safe-fetch.js";
+import { analysisSlots } from "./metadata/pipeline.js";
+
+const API_SECURITY_HEADERS: Record<string, string> = {
+  "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
-  "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 };
+const UI_CSP =
+  "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-export async function startApi(config: AppConfig, host: string, port: number): Promise<void> {
+const PUBLIC_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "public");
+
+export interface BuildOptions {
+  /** Corpus database path (default: $DATA_DIR/corpus.db, DATA_DIR defaults to ./data). ":memory:" for tests. */
+  corpusPath?: string;
+  /** Start the autonomous crawler in this process (default: CRAWLER_ENABLED !== "off"). */
+  crawler?: boolean;
+  /** Mount the legacy v1 crawler/chat/deep-web routes (SQLite + disk). Default: LEGACY_API=on. */
+  legacy?: boolean;
+  logger?: boolean;
+}
+
+/** Build the Fastify app without listening (used by tests via app.inject). */
+export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Promise<FastifyInstance> {
+  const startedAt = Date.now();
+  const app = Fastify({
+    logger: opts.logger ?? true,
+    trustProxy: true, // Railway terminates TLS at its edge proxy; req.ip must be the client.
+    bodyLimit: 1024 * 1024,
+    requestTimeout: 120_000,
+  });
+  app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: Number(process.env.MAX_UPLOAD_BYTES ?? 25 * 1024 * 1024) }, (_req, body, done) => done(null, body));
+
+  const corsOrigins = (process.env.CORS_ORIGIN ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  await app.register(cors, { origin: corsOrigins.length ? corsOrigins : false, methods: ["GET", "POST", "OPTIONS"] });
+
+  app.addHook("onSend", async (req, reply) => {
+    for (const [k, v] of Object.entries(API_SECURITY_HEADERS)) reply.header(k, v);
+    const type = String(reply.getHeader("content-type") ?? "");
+    reply.header("Content-Security-Policy", type.includes("text/html") ? UI_CSP : "default-src 'none'; frame-ancestors 'none'");
+  });
+
+  const keys = new ApiKeys();
+  const stats = new LatencyStats();
+  let shuttingDown = false;
+  app.decorate("markShuttingDown", () => (shuttingDown = true));
+
+  app.get("/health", async () => ({ status: "ok", service: "omnispider", version: "2.0.0", uptimeSeconds: Math.round((Date.now() - startedAt) / 1000) }));
+  app.get("/ready", async (_req, reply) => {
+    if (shuttingDown) return reply.code(503).send({ ready: false, reason: "shutting_down" });
+    const mem = process.memoryUsage().rss;
+    const limit = Number(process.env.MEMORY_SOFT_LIMIT_MB ?? 900) * 1024 * 1024;
+    const slots = analysisSlots.stats;
+    const ready = mem < limit && slots.queued < 150;
+    return reply.code(ready ? 200 : 503).send({ ready, rssMb: Math.round(mem / 1048576), analysisSlots: slots, egress: getEgressMode() });
+  });
+
+  await registerV2(app, { keys, stats, corsOrigin: corsOrigins[0] ?? null, startedAt });
+
+  const store = new CorpusStore(opts.corpusPath ?? join(process.env.DATA_DIR ?? "./data", "corpus.db"));
+  const crawlerOn = opts.crawler ?? process.env.CRAWLER_ENABLED !== "off";
+  const crawler = crawlerOn ? new AutonomousCrawler({ store }) : null;
+  registerCorpusRoutes(app, { store, crawler, keys });
+  app.addHook("onReady", async () => crawler?.start());
+  app.addHook("onClose", async () => {
+    await crawler?.stop();
+    store.close();
+  });
+  const prune = setInterval(() => store.pruneEvents(), 6 * 3600_000);
+  prune.unref();
+  app.addHook("onClose", async () => clearInterval(prune));
+
+  if (existsSync(PUBLIC_DIR)) {
+    await app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: "/", index: ["index.html"], maxAge: 3600_000, immutable: false });
+    // Client-side routes (/search, /resource, /crawl …) resolve to the SPA shell instead of 404.
+    app.setNotFoundHandler((req, reply) => {
+      if (req.method === "GET" && !req.url.startsWith("/api/") && !req.url.startsWith("/v1/") && (req.headers.accept ?? "").includes("text/html")) {
+        return reply.type("text/html").sendFile("index.html");
+      }
+      return reply.code(404).send({ error: "NOT_FOUND", path: req.url.split("?")[0] });
+    });
+  }
+
+  const legacy = opts.legacy ?? process.env.LEGACY_API === "on";
+  if (legacy) await registerLegacy(app, config, keys);
+  return app;
+}
+
+/**
+ * Legacy v1 routes (crawl jobs, chat, Scribd/deep-web corpus). They persist to
+ * SQLite/disk, so they are opt-in (LEGACY_API=on) and, when API_KEYS is set,
+ * require a key. The person-profiling `/v1/lookup` route has been removed.
+ */
+async function registerLegacy(app: FastifyInstance, config: AppConfig, keys: ApiKeys): Promise<void> {
   const security = config.security.enabled ? buildSecurityStack(config) : null;
   const orchestrator = new Orchestrator(config, security);
   orchestrator.init();
-
-  const app = Fastify({ logger: true });
-
   const deepCfg = resolveDeepWebConfig();
-  await app.register(cors, {
-    origin: deepCfg.corsOrigins.length ? deepCfg.corsOrigins : true,
-    methods: ["GET", "POST", "OPTIONS"],
-  });
-
-  app.addHook("onSend", async (_req, reply) => {
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) reply.header(k, v);
-  });
-
+  app.addHook("onClose", async () => orchestrator.shutdown());
   app.addHook("preHandler", async (req, reply) => {
     const path = req.url.split("?")[0];
-    if (path === "/health" || path === "/organism/vitals") return;
-
-    if (!security) return;
-    if (!security.rateLimiter.tryAcquire()) {
-      return reply.code(429).send({ error: "RATE_LIMITED" });
-    }
-    reply.raw.on("finish", () => security.rateLimiter.release());
-
-    if (!security.vitalGuard.isVital()) {
-      return reply.code(503).send({ error: "ORGANISM_LOCKDOWN" });
-    }
-
-    const clientIp = req.ip;
-    if (!security.allowlist.isAllowed(clientIp)) {
-      return reply.code(403).send({ error: "CLIENT_NOT_ALLOWLISTED" });
-    }
-
-    if (security.auth.requireAuth && !config.security.devMode) {
-      const auth = req.headers.authorization;
-      if (!auth?.startsWith("Bearer ")) return reply.code(401).send({ error: "UNAUTHORIZED" });
-      const principal = security.auth.verifyToken(auth.slice(7).trim());
-      if (!principal) return reply.code(401).send({ error: "UNAUTHORIZED" });
-      (req as { principal?: unknown }).principal = principal;
-    }
-
-    if (!security.rbac.authorize((req as { principal?: { roles: Role[] } | null }).principal ?? null, req.method, path)) {
-      if (!config.security.devMode || security.auth.requireAuth) {
-        return reply.code(403).send({ error: "FORBIDDEN" });
-      }
+    const isLegacy = path.startsWith("/v1/") || (path.startsWith("/api/") && !path.startsWith("/api/v2/"));
+    if (!isLegacy) return;
+    if (keys.enabled && !keys.verify(ApiKeys.tokenFrom(req))) return reply.code(401).send({ error: "UNAUTHORIZED" });
+    if (!keys.enabled && process.env.NODE_ENV === "production") {
+      return reply.code(403).send({ error: "LEGACY_API_REQUIRES_API_KEYS", message: "Set API_KEYS to use legacy routes in production." });
     }
   });
-
-  app.get("/health", async () => ({
-    status: "ok",
-    service: "omnispider",
-    version: "1.0.0",
-    security: "nomad_cyber",
-    organismVital: security?.vitalGuard.isVital() ?? true,
-  }));
-
-  app.get("/organism/vitals", async () => security?.vitalGuard.getVitalsReport() ?? {});
-
-  app.post<{ Body: { topic: string; seeds?: string[]; maxDepth?: number; maxPages?: number; exhaustive?: boolean } }>(
-    "/v1/lookup",
-    async (req, reply) => {
-      const { topic, seeds, maxDepth, maxPages, exhaustive } = req.body ?? {};
-      if (!topic) return reply.code(400).send({ error: "topic required" });
-      const report = await runTopicLookup(config, security, {
-        topic,
-        extraSeeds: seeds ?? [],
-        maxDepth: maxDepth ?? 5,
-        maxPages: maxPages ?? 500,
-        exhaustive: exhaustive !== false,
-        includeArchive: true,
-      });
-      return { report, text: formatReportText(report) };
-    },
-  );
 
   app.get("/v1/domain-seeds", async () => loadDomainSeeds());
 
@@ -435,11 +470,25 @@ export async function startApi(config: AppConfig, host: string, port: number): P
   });
 
   if (security && config.security.enabled) {
-    setInterval(() => security.vitalGuard.pulseCheck(), config.security.organismPulseSeconds * 1000);
+    const t = setInterval(() => security.vitalGuard.pulseCheck(), config.security.organismPulseSeconds * 1000);
+    t.unref();
+    app.addHook("onClose", async () => clearInterval(t));
   }
+  if (deepCfg.autoSync) startDeepWebScheduler(config);
+}
 
-  startDeepWebScheduler(config);
-
+export async function startApi(config: AppConfig, host: string, port: number): Promise<void> {
+  const app = await buildApp(config);
+  const shutdown = async (signal: string) => {
+    app.log.info({ signal }, "shutdown_started");
+    (app as unknown as { markShuttingDown: () => void }).markShuttingDown();
+    const force = setTimeout(() => process.exit(1), 15_000);
+    force.unref();
+    await app.close().catch(() => undefined);
+    process.exit(0);
+  };
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.on("unhandledRejection", (err) => app.log.error({ err }, "unhandled_rejection"));
   await app.listen({ host, port });
-  console.log(`Omnispider API listening on http://${host}:${port}`);
 }
