@@ -1,6 +1,7 @@
 import { CATEGORIES, CATEGORY_BY_ID, categoryApplies } from "../metadata/categories.js";
 import type { MetadataField, ResourceKind } from "../metadata/types.js";
 import type { Corpus, LinkedResource, SearchCandidate } from "./types.js";
+import { isExcludedHost } from "./host-policy.js";
 
 const STOP = new Set("a an and are as at be by can do does for from has have how i in is it its me my of on or show that the their there these this to was what when where which who why will with find list about any all get tell give please".split(" "));
 
@@ -95,6 +96,21 @@ function factSheet(fields: MetadataField[], supporting: Array<{ link: LinkedReso
   };
 }
 
+/** A preview image for result cards: the resource itself when it is an image, else its declared share image. */
+export function thumbnailFor(r: Pick<SearchCandidate, "kind" | "url" | "final_url">, fields: MetadataField[]): string | null {
+  const candidates = r.kind === "image" ? [r.final_url ?? r.url] : fields.filter((f) => f.field === "previewImage" || f.field === "thumbnailUrl").map((f) => f.value);
+  for (const v of candidates) {
+    if (typeof v !== "string") continue;
+    try {
+      const u = new URL(v, r.final_url ?? r.url);
+      if (u.protocol === "https:" || u.protocol === "http:") return u.href;
+    } catch {
+      /* not a URL */
+    }
+  }
+  return null;
+}
+
 /**
  * Answer an ordinary question from the collected corpus: rank resources by
  * full-text relevance over contents + metadata, boost resource types the
@@ -116,7 +132,8 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
   const contentTerms = terms.filter((t) => !TYPE_WORDS.test(t));
   const searchTerms = contentTerms.length ? contentTerms : terms;
   const found = await store.searchResources({ terms: searchTerms, kind: opts.kind, host: opts.host, category: opts.category, limit: Math.min(limit * 3, 100), offset: opts.offset ?? 0 });
-  const { rows, total } = found;
+  const { total } = found;
+  const rows = found.rows.filter((r) => !isExcludedHost(r.host));
   const scored = rows.map((r) => {
     const hay = `${r.title ?? ""} ${r.description ?? ""} ${r.url} ${r.snippet ?? ""}`.toLowerCase();
     const coverageRatio = searchTerms.filter((t) => hay.includes(t)).length / searchTerms.length;
@@ -165,6 +182,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
       snapshots: r.snapshot_count,
       changes: r.change_count,
       categoriesObserved: [...observed].sort((a, b) => a - b),
+      thumbnail: thumbnailFor(r, all),
       facts: factSheet(all, supporting),
       evidence: evidenceFields.map((f) => ({ category: f.category, categoryName: CATEGORY_BY_ID.get(f.category)!.name, field: f.field, value: f.value, original: f.original, status: f.status, evidenceType: f.evidenceType, scope: f.scope, method: f.method, extractor: f.extractor, evidence: f.evidence, observedAt: f.observedAt })),
       gaps,

@@ -1,4 +1,5 @@
 import pg from "pg";
+import { isExcludedUrl } from "./host-policy.js";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import type { MetadataField, ResourceRecord } from "../metadata/types.js";
@@ -166,6 +167,7 @@ export class PgCorpus implements Corpus {
   }
 
   async enqueue(items: FrontierItem[], now = Date.now()): Promise<number> {
+    items = items.filter((i) => !isExcludedUrl(i.url));
     if (!items.length) return 0;
     const ts = new Date(now).toISOString();
     const uniq = [...new Map(items.map((i) => [i.url, i])).values()];
@@ -486,8 +488,9 @@ export class PgCorpus implements Corpus {
     if (!orQ) return { rows: [], total: 0 };
     const filters = ["r.duplicate_of IS NULL", "r.state = 'indexed'"];
     const extra: unknown[] = [];
-    if (q.kind) (extra.push(q.kind), filters.push(`r.kind = $${extra.length + 1}`));
-    if (q.host) (extra.push(q.host), filters.push(`r.host = $${extra.length + 1}`));
+    const kinds = q.kind ? q.kind.split(",").filter(Boolean) : [];
+    if (kinds.length) (extra.push(kinds), filters.push(`r.kind = ANY($${extra.length + 1}::text[])`));
+    if (q.host) (extra.push(q.host, `%.${q.host}`), filters.push(`(r.host = $${extra.length} OR r.host LIKE $${extra.length + 1})`));
     if (q.category) (extra.push(q.category), filters.push(`EXISTS (SELECT 1 FROM observations o WHERE o.resource_id = r.id AND o.category = $${extra.length + 1})`));
     const where = filters.join(" AND ");
     const run = async (tsq: string, limit: number, offset: number) => {

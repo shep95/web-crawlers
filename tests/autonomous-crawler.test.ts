@@ -233,6 +233,19 @@ for (const makeBackend of backends()) {
       if (csvHit) expect(csvHit.gaps.find((g) => g.category === 29)?.state).toBe("not_applicable");
     });
 
+    it("gives result cards a real preview image and honours multi-kind and subdomain host filters", async () => {
+      const ds = (await searchCorpus(store, "regional rainfall observations")).results.find((r) => r.url === `${base}/datasets/rainfall`)!;
+      expect(ds.thumbnail).toBe(`${base}/media/gauge.jpg`);
+      const media = await searchCorpus(store, "rain gauge flyover", { kind: "image,video" });
+      expect(media.results.length).toBeGreaterThan(0);
+      expect(media.results.every((r) => r.kind === "image" || r.kind === "video")).toBe(true);
+      const img = media.results.find((r) => r.kind === "image");
+      if (img) expect(img.thumbnail).toBe(img.finalUrl ?? img.url);
+      const host = new URL(base).hostname;
+      expect((await searchCorpus(store, "rainfall", { host })).results.every((r) => r.host === host)).toBe(true);
+      expect((await searchCorpus(store, "rainfall", { host: "elsewhere.example" })).results).toHaveLength(0);
+    });
+
     it("covers all 41 categories with real observations across the crawled corpus", async () => {
       expect((await store.stats()).categoriesObserved).toBe(41);
       const detail = (await resourceDetail(store, (await url("/files/rainfall.csv"))!.id))!;

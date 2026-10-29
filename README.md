@@ -86,7 +86,7 @@ These numbers came from one machine and are not a promise about yours. Capacity 
 
 | Method | Path | |
 |---|---|---|
-| `GET` | `/api/v2/search?q=` | Answer from the collected corpus: fact sheets, evidence, supporting resources, gaps |
+| `GET` | `/api/v2/search?q=` | Answer from the collected corpus: fact sheets, evidence, supporting resources, gaps, preview `thumbnail`. Filters: `kind` (comma list, e.g. `image,video`), `host` (matches subdomains), `category`, `limit`, `offset` |
 | `GET` | `/api/v2/resources/:id` | Stages, 41-category states, observations, relationships, snapshots, crawler events |
 | `GET` | `/api/v2/resources?url=` | Look up a collected resource |
 | `GET` | `/api/v2/resources/:id/snapshots/:sid` | Historical snapshot |
@@ -116,7 +116,7 @@ const { results } = await res.json(); // results[i].facts, .evidence, .gaps, .su
 2. **api service:** deploy from this repo; variables `SERVICE_ROLE=api`, `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `CORS_ORIGIN=…`; generate a domain; scale replicas as needed.
 3. **crawler service:** same repo; `SERVICE_ROLE=crawler`, `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `RENDER_JS=on`; no domain; scale replicas or split profiles (`CRAWLER_PROFILES=datasets`) into more services.
 
-Health checks use `/health`. All settings are listed in [`.env.example`](.env.example), and operator-managed seeds are in [`config/discovery.yaml`](config/discovery.yaml).
+Health checks use `/health`. By default the Wikimedia family (Wikipedia, Wikidata, Commons…) is never crawled or returned so answers come from primary publishers; override with `EXCLUDED_HOSTS`. All settings are listed in [`.env.example`](.env.example), and operator-managed seeds are in [`config/discovery.yaml`](config/discovery.yaml).
 
 ## Run locally
 

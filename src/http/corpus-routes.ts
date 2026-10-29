@@ -6,6 +6,8 @@ import { resourceDetail, searchCorpus } from "../corpus/search.js";
 import { SYSTEM_RETENTION } from "../corpus/types.js";
 import { learnedAdjustment } from "../corpus/patterns.js";
 import { federatedSearch } from "../search/engine.js";
+import { PROVIDERS } from "../search/providers.js";
+import { EXCLUDED_PROVIDERS } from "../corpus/host-policy.js";
 import { canonicalizeUrl } from "../crawl/site-crawler.js";
 import { EXTRACTORS } from "../metadata/extractors/index.js";
 import { CATEGORIES } from "../metadata/categories.js";
@@ -16,7 +18,7 @@ const SearchQ = z.object({
   q: z.string().trim().min(1).max(500),
   limit: z.coerce.number().int().min(1).max(50).optional(),
   offset: z.coerce.number().int().min(0).max(1000).optional(),
-  kind: z.string().regex(/^[a-z]+$/).optional(),
+  kind: z.string().regex(/^[a-z]+(,[a-z]+){0,5}$/).optional(),
   category: z.coerce.number().int().min(1).max(41).optional(),
   host: z.string().max(253).optional(),
 });
@@ -68,7 +70,7 @@ export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus
     if (deps.topicalDiscovery && res.total < 5 && !recentTopics.get(topic)) {
       recentTopics.set(topic, Date.now());
       discovery = { queued: true, reason: "few collected resources match; topical discovery queued — candidates will be retrieved, inspected and indexed in the background" };
-      void federatedSearch(r.data.q, { limit: 40, perProvider: 6 })
+      void federatedSearch(r.data.q, { limit: 40, perProvider: 6, providers: PROVIDERS.map((p) => p.id).filter((id) => !EXCLUDED_PROVIDERS.has(id)) })
         .then(async (fs) => {
           const items = fs.results
             .map((x) => ({ x, url: canonicalizeUrl(x.url) }))

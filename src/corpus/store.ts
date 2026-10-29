@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { isExcludedUrl } from "./host-policy.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -155,6 +156,7 @@ export class SqliteCorpus implements Corpus {
   }
 
   async enqueue(items: FrontierItem[], now = Date.now()): Promise<number> {
+    items = items.filter((i) => !isExcludedUrl(i.url));
     const insert = this.db.prepare(`INSERT INTO resources (url, url_hash, host, state, priority, depth, via, purpose, parent_id, due_at, discovered_at)
       VALUES (@url, @hash, @host, 'queued', @priority, @depth, @via, @purpose, @parentId, @due, @ts)
       ON CONFLICT(url) DO UPDATE SET priority = MAX(priority, excluded.priority) WHERE state = 'queued'`);
@@ -421,8 +423,9 @@ export class SqliteCorpus implements Corpus {
   async searchResources(q: { terms: string[]; kind?: string; host?: string; category?: number; limit: number; offset: number }) {
     const filters = ["r.duplicate_of IS NULL", "r.state = 'indexed'"];
     const extra: unknown[] = [];
-    if (q.kind) (filters.push("r.kind = ?"), extra.push(q.kind));
-    if (q.host) (filters.push("r.host = ?"), extra.push(q.host));
+    const kinds = q.kind ? q.kind.split(",").filter(Boolean) : [];
+    if (kinds.length) (filters.push(`r.kind IN (${kinds.map(() => "?").join(",")})`), extra.push(...kinds));
+    if (q.host) (filters.push("(r.host = ? OR r.host LIKE ?)"), extra.push(q.host, `%.${q.host}`));
     if (q.category) (filters.push("EXISTS (SELECT 1 FROM observations o WHERE o.resource_id = r.id AND o.category = ?)"), extra.push(q.category));
     const where = filters.join(" AND ");
     const run = (match: string, limit: number, offset: number) =>
