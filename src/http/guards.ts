@@ -30,9 +30,13 @@ export class ApiKeys {
   }
 }
 
-/** Sliding-window per-client limiter with periodic cleanup (bounded memory). */
+/**
+ * Per-client sliding-window counter (two fixed buckets, weighted): O(1) time
+ * and memory per client regardless of request rate. Approximates a true
+ * sliding log to within one bucket's error, which is the standard trade-off.
+ */
 export class ClientRateLimiter {
-  private hits = new Map<string, number[]>();
+  private buckets = new Map<string, { start: number; cur: number; prev: number }>();
   private timer: NodeJS.Timeout;
   constructor(
     private perMinute: number,
@@ -43,19 +47,24 @@ export class ClientRateLimiter {
   }
   check(client: string): { ok: boolean; retryAfterS: number; remaining: number } {
     const now = Date.now();
-    const arr = (this.hits.get(client) ?? []).filter((t) => t > now - this.windowMs);
-    if (arr.length >= this.perMinute) {
-      this.hits.set(client, arr);
-      return { ok: false, retryAfterS: Math.ceil((arr[0] + this.windowMs - now) / 1000), remaining: 0 };
+    const windowStart = now - (now % this.windowMs);
+    let b = this.buckets.get(client);
+    if (!b) this.buckets.set(client, (b = { start: windowStart, cur: 0, prev: 0 }));
+    if (b.start !== windowStart) {
+      b.prev = b.start === windowStart - this.windowMs ? b.cur : 0;
+      b.cur = 0;
+      b.start = windowStart;
     }
-    arr.push(now);
-    this.hits.set(client, arr);
-    return { ok: true, retryAfterS: 0, remaining: this.perMinute - arr.length };
+    const weight = 1 - (now - windowStart) / this.windowMs;
+    const estimate = b.prev * weight + b.cur;
+    if (estimate >= this.perMinute) return { ok: false, retryAfterS: Math.max(1, Math.ceil((windowStart + this.windowMs - now) / 1000)), remaining: 0 };
+    b.cur++;
+    return { ok: true, retryAfterS: 0, remaining: Math.max(0, Math.floor(this.perMinute - estimate - 1)) };
   }
   private sweep() {
-    const cutoff = Date.now() - this.windowMs;
-    for (const [k, v] of this.hits) if (!v.length || v[v.length - 1] < cutoff) this.hits.delete(k);
-    if (this.hits.size > 50_000) this.hits.clear();
+    const cutoff = Date.now() - 2 * this.windowMs;
+    for (const [k, v] of this.buckets) if (v.start < cutoff) this.buckets.delete(k);
+    if (this.buckets.size > 200_000) this.buckets.clear();
   }
   stop() {
     clearInterval(this.timer);

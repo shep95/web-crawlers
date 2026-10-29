@@ -2,144 +2,147 @@
 
 # Omnispider
 
-**An autonomous crawler that discovers public web resources, retrieves the actual files behind them, and extracts evidence-backed metadata across 41 categories — then answers questions from what it has collected.**
+**Autonomous crawlers that discover public web resources on their own — pages *and* standalone files — retrieve the actual content, and extract evidence-backed metadata across 41 categories into a searchable corpus.**
 
 [![Node.js 22](https://img.shields.io/badge/node-22-0f172a?style=flat-square&logo=nodedotjs)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/typescript-strict-1e293b?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-182%20passing-166534?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-210%20passing%20(SQLite%20%2B%20Postgres)-166534?style=flat-square)](#testing)
 [![Railway](https://img.shields.io/badge/deploy-Railway-0b0d0e?style=flat-square&logo=railway)](#deploy-on-railway)
-[![License: MIT](https://img.shields.io/badge/license-MIT-14532d?style=flat-square)](LICENSE)
+[![OpenAPI](https://img.shields.io/badge/API-OpenAPI%203.1-1e3a5f?style=flat-square)](#connect-your-frontend)
 
 </div>
 
 ---
 
-## What it does
+## The idea in one scenario
 
-Nobody types in URLs. A system-managed frontier is seeded from public catalogs, feeds and sitemaps, and grows through everything the crawler reads. Every discovered resource goes through **two connected paths**:
+Nobody is typing anything. The crawlers discover a public research site through a sitemap. They don't stop at its listing page: they retrieve the **report** (title, author, creation date, producing software, pages, citations, licence), the **photographs** (camera, exposure, capture time, dimensions, credits, GPS rounded to ~1 km), the **video** (duration, resolution, codec, frame rate, subtitle tracks), and the **dataset** (columns, types, units, geographic and temporal coverage computed from the data, missing values, duplicates). Then they follow the **methodology**, **licence** and **revision** records and link them back to the dataset with the right scope.
 
-| Path | What happens |
-|---|---|
-| **Evidence & metadata** | Retrieve → detect the real format from bytes → run the matching extractors (HTML, PDF, Office, images, audio/video, CSV/JSON/XML, feeds, archives, email) → normalise → validate → store each field with its evidence → index |
-| **Discovery** | Classify every reference by *purpose* (artifact, licence, methodology, schema, changelog, provenance, citation, model card…) → prioritise → enqueue, with trap, budget and robots controls |
-
-A dataset page is not "done" when its title is indexed: its CSV, methodology PDF, schema, licence page and changelog are retrieved and inspected too, and linked back to it with the purpose they serve.
-
-Users ask ordinary questions; answers come from the **collected corpus** — resources, field-level evidence, supporting documents, and the gaps that remain.
+Later someone asks:
 
 ```text
-GET /api/v2/search?q=how was the rainfall data sampled
-
-→ methodology.pdf   (supporting:methodology of /datasets/rainfall)
-    Statistical · methodologyStatement  "Methodology: sampling design uses 4 tipping-bucket gauges."
-                    source claim · resource scope · pdf text layer · 2026-10-29T12:00:00Z
-    Statistical · sampleSize            1250
-    Identity    · doi                   ["10.5555/rain.2025"]
-  referenced by: Regional Rainfall Observations
+GET /api/v2/search?q=research datasets about snowfall in northern india
 ```
+
+…and gets the dataset with a fact sheet built from what was already collected: publisher, spatial and temporal coverage, formats, methods (including facts from the linked methodology document), licence and its scope, version, identifiers, supporting sources, and the gaps that remain. Each value carries its evidence.
+
+This exact scenario is an automated test ([`tests/scenario-snowfall.test.ts`](tests/scenario-snowfall.test.ts)), run against both storage backends.
+
+## What makes the crawlers different
+
+| Capability | What it does |
+|---|---|
+| **Autonomous discovery** | System-managed frontier seeded from public catalogs (Data.gov, Zenodo, Hugging Face Hub, Wikimedia Commons, Internet Archive, arXiv, Hacker News), operator sitemaps/feeds, and the **Common Crawl index by MIME type**. It expands through everything it reads. Users never supply URLs. |
+| **Standalone files** | Bare files with no webpage are found via S3/GCS bucket listings, `Index of /` directory pages, Internet Archive manifests, feeds/enclosures, JSON catalogs, references inside PDFs, and archive contents. |
+| **Two paths per resource** | *Evidence path:* retrieve → detect format from bytes → extract → normalise → validate → store with evidence → index. *Discovery path:* classify every reference by **purpose** (artifact, licence, methodology, schema, revision, provenance, citation, model card…) → prioritise → enqueue. |
+| **Learns its own patterns** | A yield model per URL pattern (`zenodo.org/records/{n}/files/*.csv`) records success rate, fields and categories obtained, and cost. Priorities are re-weighted from it, with an exploration bonus for unseen patterns and a penalty for persistently failing ones. Exposed at `/api/v2/crawler/capabilities`. |
+| **Gap pursuit** | When an applicable category is still missing, references matching that category's registry discovery rule are boosted (bounded to 4 per resource; never fabricated). |
+| **Specialised crawlers** | Profiles `generalist`, `datasets`, `media`, `documents`, `refresh`. Run them together or as separate services, each with any number of replicas on one shared frontier. |
+| **Format-true inspection** | HTML/JSON-LD/microdata/RDFa/Dublin Core/Highwire; PDF (Info, XMP/PDF-A, text layer, attachments, signatures); Office/ODF; EXIF/IPTC/XMP/ICC; **OCR** for text-in-image; audio tags; MP4/MOV box parser; CSV/JSON Schema/OpenAPI/Data Package/CKAN; XML/DataCite/sitemaps/feeds; ZIP/TAR/TGZ (capped, BagIt); `.eml`; model cards; `CITATION.cff`; `security.txt`. |
+| **Selective rendering** | Headless Chromium only for pages whose delivered HTML is an empty app shell; never screenshots. |
+| **Change awareness** | Conditional revisits (ETag/Last-Modified), adaptive revisit intervals, snapshot history, field-level diffs of meaningful changes. |
+| **Safety** | robots.txt (RFC 9309) incl. redirect targets, crawl-delay, one request per host at a time across all replicas, per-host budgets, failure back-off, trap detection (pagination, calendars, facets, repeating paths), SSRF guard with DNS pinning on every hop, decompression caps, no bypassing of logins/paywalls. |
+
+## Evidence model
+
+Every observation is stored with: original + normalised value · category (1–41) · source resource · snapshot · method/locator · extractor@version · observed time · **evidence type** (`direct_extraction` · `source_claim` · `system_measurement` · `inferred`) · **status** (`observed` · `source_declared` · `corroborated` · `inferred` · `contradicted` · `extraction_failed`) · **scope** (`resource` · `collection` · `organization` · `site`).
+
+Every resource reports all 41 categories as **observed · not found after inspection · unavailable · not applicable · extraction failed**. Contradictions are preserved, identical copies are linked as duplicates (not independent evidence), and personal data is counted and masked, never stored. The crawler's own events, state and retention policy are recorded separately from source claims.
+
+The registry ([`src/metadata/categories.ts`](src/metadata/categories.ts)) defines, per category: applicability, methods, core + extended fields, supporting-source discovery rule, validation checks and limitations. See the [coverage matrix](docs/COVERAGE.md).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph Discovery
-    B[Bootstrap sources<br/>Data.gov · Zenodo · HF Hub · Commons<br/>Internet Archive · arXiv · HN · sitemaps/feeds]
-    T[Topical discovery<br/>when questions find little]
+  subgraph crawler["crawler service (N replicas)"]
+    G[generalist] & D[datasets] & M[media] & DOC[documents] & R[refresh]
   end
-  B --> F[(Frontier<br/>SQLite)]
-  T --> F
-  F -->|lease · 1/host · crawl-delay| R[Retrieve<br/>SSRF-pinned fetch<br/>conditional GET]
-  R --> I[Inspect<br/>magic-byte format detection]
-  I --> X[Extract<br/>20+ extractor plugins<br/>41-category registry]
-  X --> E[(Evidence store<br/>snapshots · observations<br/>relationships · events)]
-  E --> S[FTS5 index<br/>contents + metadata]
-  X -->|references by purpose| F
-  S --> Q[/api/v2/search/]
+  subgraph api["api service (N replicas, stateless)"]
+    S["/api/v2/search · resources · capabilities"]
+  end
+  B[Bootstrap sources<br/>catalogs · Common Crawl · sitemaps · feeds] --> PG
+  crawler <-->|lease · claim host · store evidence| PG[(Postgres<br/>frontier · snapshots · observations<br/>relationships · patterns · FTS)]
+  S --> PG
+  FE[Your frontend] -->|HTTPS + CORS| S
 ```
 
-* **Modular monolith** — API, crawler worker and index in one Node process; the corpus is SQLite (WAL) on a Railway volume. One writer, no external queue to operate. Workers are bounded (`CRAWL_CONCURRENCY`, one in-flight request per host).
-* **Crash-safe** — work is leased; on restart every outstanding lease is returned to the queue.
-* **Stage tracking** — `retrieved_at`, `inspected_at`, `extracted_at`, `indexed_at` are recorded separately per resource; discovery alone never counts as processed.
+* **Postgres** is the single source of truth. Crawler replicas coordinate through atomic row claims, so two workers never fetch the same resource, never hit one host concurrently, and run each discovery source once per interval. This is verified by a multi-replica test.
+* **API replicas are stateless**, with short answer caching, request coalescing and `Cache-Control` headers so a CDN can absorb repeat traffic.
+* SQLite is supported for single-node and local use (`DATABASE_URL` unset).
 
-## Metadata model
+### Measured performance
 
-Every observation is stored with:
+`scripts/bench-search.ts` runs a 20,000-document corpus with 64 concurrent connections. It was measured on one 4-vCPU machine that was also running Postgres and the load generator:
 
-| | |
-|---|---|
-| value / original | normalised value (UTC ISO dates, checksummed identifiers) and the raw string |
-| category | one of 41 ([registry](src/metadata/categories.ts), [coverage matrix](docs/COVERAGE.md)) |
-| evidence type | `direct_extraction` (embedded file property) · `source_claim` · `system_measurement` · `inferred` |
-| status | `observed` · `source_declared` · `corroborated` · `inferred` · `contradicted` · `extraction_failed` |
-| scope | `resource` · `collection` · `organization` · `site` — a footer licence is not stamped onto every file |
-| provenance | source resource, snapshot, method/locator, extractor@version, observed-at |
+| Workload | Throughput | p50 | p99 | Errors |
+|---|---|---|---|---|
+| Distinct questions (cold) | ~970 req/s | 24 ms | 217 ms | 0 |
+| Popular questions (cached) | ~2,400 req/s | 22 ms | 163 ms | 0 |
 
-Each resource reports all 41 categories as **observed · not found after inspection · unavailable · not applicable · extraction failed**. Contradictions are preserved, not merged; identical bytes at different URLs are linked as duplicates and not treated as independent evidence; PII is counted and masked, never stored as values.
-
-## Supported formats
-
-| Kind | Extracted |
-|---|---|
-| Webpages | headers, redirects, meta/OG/Twitter, JSON-LD/microdata/RDFa/Dublin Core, Highwire citations, headings/tables/landmarks, forms → constraints, alt-text/caption audit, licences (with scope), retention statements, SRI, references with page region |
-| PDF | Info dict, XMP (incl. PDF/A), page tree, text layer (DOIs, methodology, sample sizes, licence text, links), attachments, signature markers, tagging |
-| Office | DOCX/XLSX/PPTX/ODF core + app properties (personal names masked), signatures |
-| Images | dimensions, EXIF/IPTC/XMP/ICC, device & firmware, GPS (rounded ~1 km) |
-| Audio / video | tags, codecs, sample rate, channels; MP4/MOV box parser: duration, resolution, frame rate, track languages, subtitle tracks |
-| Data | CSV dialect/types/statistics/null rates; JSON Schema, OpenAPI, Frictionless Data Package, CKAN, model `config.json`; XML namespaces/XSD, DataCite, sitemaps, RSS/Atom |
-| Text | model/dataset cards, `CITATION.cff`, `security.txt`, checksum manifests |
-| Archives | ZIP / TAR / TAR.GZ listings, BagIt + checksum manifests, small entries inspected as contained resources (inflation hard-capped) |
-| Email | `.eml` headers, reply chains, MIME parts, attachments, DKIM presence (addresses masked) |
-| Enrichment | public DNS, TLS certificate, Wayback captures, Crossref corroboration, GitHub / Hugging Face / PyPI / npm registry records, published-checksum verification |
+These numbers came from one machine and are not a promise about yours. Capacity grows by adding API replicas, Postgres read replicas and a CDN. No single deployment serves "everyone on Earth at once", so plan capacity from measurements like these.
 
 ## API
 
 | Method | Path | |
 |---|---|---|
-| `GET` | `/api/v2/search?q=` | Answer from the collected corpus (evidence, supporting resources, gaps); queues topical discovery when coverage is thin |
-| `GET` | `/api/v2/resources/:id` | Full evidence view: stages, 41-category states, observations, relationships, snapshots, crawler events |
-| `GET` | `/api/v2/resources?url=` | Look up a collected resource by URL |
-| `GET` | `/api/v2/resources/:id/snapshots/:sid` | A historical snapshot with its observations |
-| `GET` | `/api/v2/crawler/status` | Frontier, states, kinds, sources, recent events, retention policy |
-| `POST` | `/api/v2/crawler/pause` · `/resume` | Admin (requires `API_KEYS`) |
-| `GET/POST` | `/api/v2/analyze?url=` | Inspect one public URL on demand (optional) |
-| `POST` | `/api/v2/analyze/upload` | Inspect an uploaded file, raw body (optional) |
-| `GET` | `/api/v2/categories` · `/extractors` · `/stats` · `/info` | Registry, plugins, latency p50/p95/p99 |
+| `GET` | `/api/v2/search?q=` | Answer from the collected corpus: fact sheets, evidence, supporting resources, gaps |
+| `GET` | `/api/v2/resources/:id` | Stages, 41-category states, observations, relationships, snapshots, crawler events |
+| `GET` | `/api/v2/resources?url=` | Look up a collected resource |
+| `GET` | `/api/v2/resources/:id/snapshots/:sid` | Historical snapshot |
+| `GET` | `/api/v2/crawler/status` | Frontier, states, kinds, sources, recent events |
+| `GET` | `/api/v2/crawler/capabilities` | Extractor reliability + learned URL-pattern yields |
+| `POST` | `/api/v2/crawler/pause` · `resume` | Admin (needs `API_KEYS`) |
+| `GET` | `/api/v2/categories` | The 41-category registry |
+| `GET` | `/api/v2/openapi.json` | OpenAPI 3.1 spec |
+| `GET/POST` | `/api/v2/analyze?url=` · `/api/v2/analyze/upload` | Optional on-demand inspection |
 | `GET` | `/health` · `/ready` | Liveness / readiness |
+
+## Connect your frontend
+
+1. Point it at the API service URL (e.g. `https://<api>.up.railway.app`).
+2. Set `CORS_ORIGIN` on the API service to your frontend's origin (comma-separated for several; `*` allows any).
+3. Generate a typed client from `/api/v2/openapi.json` (e.g. `npx openapi-typescript https://<api>/api/v2/openapi.json -o api.d.ts`).
+4. Optional: set `API_KEYS` and send `Authorization: Bearer <key>`.
+
+```ts
+const res = await fetch(`${API}/api/v2/search?q=${encodeURIComponent(question)}`);
+const { results } = await res.json(); // results[i].facts, .evidence, .gaps, .supportingResources
+```
+
+## Deploy on Railway
+
+1. **Postgres:** add the Postgres template.
+2. **api service:** deploy from this repo; variables `SERVICE_ROLE=api`, `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `CORS_ORIGIN=…`; generate a domain; scale replicas as needed.
+3. **crawler service:** same repo; `SERVICE_ROLE=crawler`, `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `RENDER_JS=on`; no domain; scale replicas or split profiles (`CRAWLER_PROFILES=datasets`) into more services.
+
+Health checks use `/health`. All settings are listed in [`.env.example`](.env.example), and operator-managed seeds are in [`config/discovery.yaml`](config/discovery.yaml).
 
 ## Run locally
 
 ```bash
-npm ci
-npm run build
-DATA_DIR=./data node dist/cli.js serve --port 8080
+npm ci && npm run build
+node dist/cli.js serve --port 8080          # SQLite in ./data, API + crawlers in one process
+DATABASE_URL=postgres://… node dist/cli.js serve   # Postgres
 ```
-
-The crawler starts with the server (`CRAWLER_ENABLED=off` to disable). See [`.env.example`](.env.example) for all settings and [`config/discovery.yaml`](config/discovery.yaml) for operator-managed seeds.
-
-## Deploy on Railway
-
-1. Create a service from this repository (Dockerfile build, `railway.toml` included).
-2. Attach a **volume mounted at `/data`** — the corpus lives there and survives redeploys.
-3. Set `API_KEYS` if you want the admin endpoints; everything else has sensible defaults.
-4. Generate a domain. Health check: `/health`.
-
-Keep **one replica**: the corpus is a single-writer SQLite database.
-
-## Safety & compliance
-
-* robots.txt (RFC 9309) per host incl. redirect targets, `Crawl-delay`, `nofollow`; per-host politeness and budgets; failure back-off.
-* SSRF protection on every hop: DNS answers are validated and pinned (no rebinding), private/link-local/CGNAT/metadata ranges and IPv4-mapped IPv6 blocked, redirects re-checked, byte caps and decompression-bomb limits everywhere.
-* Trap control: pagination limits, calendar and faceted-navigation detection, repeating-path detection, URL canonicalisation (tracking params, fragments, default ports), duplicate content detection.
-* Never bypasses logins, paywalls or CAPTCHAs; gated content is recorded as *unavailable*.
 
 ## Testing
 
 ```bash
-npm test                 # 182 tests
-npm run coverage:matrix  # regenerates docs/COVERAGE.md from real fixtures
+npm test                                         # SQLite
+TEST_DATABASE_URL=postgres://… npm test          # SQLite + Postgres (CI does this)
+npm run coverage:matrix                          # regenerates docs/COVERAGE.md
+DATABASE_URL=postgres://… npx tsx scripts/bench-search.ts 20000 64 20
 ```
 
-The suite includes an end-to-end autonomous crawl against a local multi-resource site (bootstrap source only → index → dataset → CSV/PDF/schema/licence/changelog/archive/media/email/model card → search), version changes with conditional revisits, crawler traps, duplicates, failing parsers and crash recovery; plus real binary fixtures (JPEG+EXIF, PNG, WAV, MP4, PDF, DOCX, zip bomb) and SSRF tests.
+The 210 tests cover:
+
+- the snowfall scenario and an autonomous crawl (index → dataset → CSV/PDF/schema/licence/changelog/archive/media/email/model card → search);
+- standalone files via S3/GCS/autoindex/IA listings and Common Crawl;
+- a multi-replica frontier (no duplicates, one request per host);
+- version changes with conditional revisits, traps, duplicates, failing parsers and crash recovery;
+- OCR and selective JS rendering;
+- real binary fixtures (JPEG+EXIF, PNG, WAV, MP4, PDF, DOCX, zip bomb), SSRF, CORS, auth and rate limits.
 
 ## Documentation
 

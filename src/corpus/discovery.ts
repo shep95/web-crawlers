@@ -85,8 +85,8 @@ export function classifyReference(
   const sameHost = host === new URL(parent.url).hostname;
   const haystack = `${url} ${ref.text}`;
   const support = SUPPORT.find((s) => (s.rel && s.rel.test(ref.rel)) || s.re.test(haystack));
-  const isArtifact = ARTIFACT_EXT.test(url) || ["img", "video", "audio", "source", "track", "embed", "object"].includes(ref.tag) || /^json:(contentUrl|downloadURL|url|path|download_url|accessURL)/i.test(ref.tag);
-  const isFeed = ref.tag === "sitemap" || ref.tag === "feed" || /rss|atom|sitemap/i.test(ref.type ?? "");
+  const isArtifact = ARTIFACT_EXT.test(url) || ["img", "video", "audio", "source", "track", "embed", "object"].includes(ref.tag) || /^json:(contentUrl|downloadURL|url|path|download_url|accessURL)/i.test(ref.tag) || (ref.tag === "listing" && !url.endsWith("/") && ref.type !== "listing");
+  const isFeed = ref.tag === "sitemap" || ref.tag === "feed" || ref.tag === "listing" || /rss|atom|sitemap/i.test(ref.type ?? "");
 
   let purpose: Purpose;
   let relation: string;
@@ -127,7 +127,7 @@ export function classifyReference(
   // Only follow artifacts/supporting refs from non-HTML parents (e.g. PDFs citing URLs) to avoid drift.
   if (parent.kind !== "webpage" && parent.kind !== "feed" && parent.kind !== "xml" && parent.kind !== "json" && purpose === "discovery") priority -= 15;
 
-  return { url, priority: Math.round(priority * 10) / 10, depth, via: ref.tag === "sitemap" ? "sitemap" : ref.tag === "feed" ? "feed" : `reference:${ref.tag}`, purpose, parentId: parent.id, relation, anchor: ref.text || null, scope };
+  return { url, priority: Math.round(priority * 10) / 10, depth, via: ref.tag === "sitemap" ? "sitemap" : ref.tag === "feed" ? "feed" : ref.tag === "listing" ? "storage_listing" : `reference:${ref.tag}`, purpose, parentId: parent.id, relation, anchor: ref.text || null, scope };
 }
 
 /** All references an inspected resource exposes, normalised into one list. */

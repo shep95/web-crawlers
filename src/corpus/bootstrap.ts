@@ -114,12 +114,62 @@ export const BUILTIN_SOURCES: DiscoverySource[] = [
   },
 ];
 
+/** Domains and MIME types sampled from the Common Crawl index (operator-tunable via config/discovery.yaml). */
+const CC_DEFAULT = {
+  domains: ["noaa.gov", "nasa.gov", "usgs.gov", "imd.gov.in", "data.gov.in", "europa.eu", "ac.uk", "edu.au", "who.int", "worldbank.org", "un.org", "gov.uk"],
+  mimes: ["application/pdf", "text/csv", "image/jpeg", "video/mp4", "application/json", "application/zip", "audio/mpeg", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+};
+
+/**
+ * Common Crawl's public URL index, queried by MIME type: finds standalone
+ * files (PDFs, CSVs, images, video, archives…) that no webpage presents.
+ * Rotates through (domain × MIME) pairs so coverage widens run by run.
+ */
+export function commonCrawlSource(cfg = CC_DEFAULT, pairsPerRun = 3): DiscoverySource {
+  let cursor = Math.floor(Date.now() / (6 * H));
+  return {
+    id: "commoncrawl_files",
+    description: "Common Crawl index — standalone files by MIME type across research/government domains",
+    intervalMs: 6 * H,
+    async run() {
+      const coll = await safeFetchJson<Array<{ id: string; "cdx-api": string }>>("https://index.commoncrawl.org/collinfo.json", { timeoutMs: 20_000 });
+      const api = coll[0]?.["cdx-api"];
+      if (!api) return [];
+      const out: FrontierItem[] = [];
+      for (let i = 0; i < pairsPerRun; i++, cursor++) {
+        const domain = cfg.domains[cursor % cfg.domains.length];
+        const mime = cfg.mimes[Math.floor(cursor / cfg.domains.length) % cfg.mimes.length];
+        const q = `${api}?url=${encodeURIComponent(domain)}&matchType=domain&filter=${encodeURIComponent(`mime:${mime}`)}&filter=status:200&output=json&limit=25`;
+        const text = await safeFetchText(q, { timeoutMs: 45_000, accept: "application/json" }).catch(() => "");
+        for (const line of text.split("\n")) {
+          try {
+            const rec = JSON.parse(line) as { url?: string };
+            const it = rec.url ? item(rec.url, "commoncrawl_files", 64, "artifact") : null;
+            if (it) out.push(it);
+          } catch {
+            /* skip non-JSON lines */
+          }
+        }
+      }
+      return out;
+    },
+  };
+}
+
 /** Extra feed/sitemap/page seeds from config/discovery.yaml (operator-managed, not user input). */
-export function configuredSources(): DiscoverySource[] {
+interface DiscoveryConfig {
+  seeds?: Array<{ id: string; url: string; type?: string; interval_hours?: number; priority?: number }>;
+  commoncrawl?: { domains?: string[]; mimes?: string[] };
+}
+
+function loadDiscoveryConfig(): DiscoveryConfig {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const path = process.env.DISCOVERY_CONFIG ?? join(root, "config", "discovery.yaml");
-  if (!existsSync(path)) return [];
-  const cfg = yaml.load(readFileSync(path, "utf8")) as { seeds?: Array<{ id: string; url: string; type?: string; interval_hours?: number; priority?: number }> };
+  return existsSync(path) ? ((yaml.load(readFileSync(path, "utf8")) as DiscoveryConfig) ?? {}) : {};
+}
+
+export function configuredSources(): DiscoverySource[] {
+  const cfg = loadDiscoveryConfig();
   return (cfg.seeds ?? []).map((s) => ({
     id: s.id,
     description: `${s.type ?? "page"} seed: ${s.url}`,
@@ -133,6 +183,7 @@ export function configuredSources(): DiscoverySource[] {
 
 export function allSources(): DiscoverySource[] {
   const enabled = (process.env.BOOTSTRAP_SOURCES ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-  const all = [...BUILTIN_SOURCES, ...configuredSources()];
+  const cc = loadDiscoveryConfig().commoncrawl;
+  const all = [...BUILTIN_SOURCES, commonCrawlSource({ domains: cc?.domains ?? CC_DEFAULT.domains, mimes: cc?.mimes ?? CC_DEFAULT.mimes }), ...configuredSources()];
   return enabled.length ? all.filter((s) => enabled.includes(s.id)) : all;
 }

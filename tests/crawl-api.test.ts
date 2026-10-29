@@ -119,6 +119,9 @@ describe("HTTP API", () => {
     expect(health.statusCode).toBe(200);
     expect(health.json().status).toBe("ok");
     expect((await app.inject("/ready")).json().ready).toBe(true);
+    const spec = (await app.inject("/api/v2/openapi.json")).json();
+    expect(spec.openapi).toBe("3.1.0");
+    expect(Object.keys(spec.paths)).toEqual(expect.arrayContaining(["/api/v2/search", "/api/v2/resources/{id}"]));
     const cats = (await app.inject("/api/v2/categories")).json();
     expect(cats.count).toBe(41);
     const ex = (await app.inject("/api/v2/extractors")).json();
@@ -143,7 +146,7 @@ describe("HTTP API", () => {
     expect((await app.inject("/api/v2/search?q=")).statusCode).toBe(400);
     const empty = (await app.inject("/api/v2/search?q=rainfall")).json();
     expect(empty).toMatchObject({ total: 0, results: [] });
-    expect((await app.inject("/api/v2/crawler/status")).json()).toMatchObject({ running: false });
+    expect((await app.inject("/api/v2/crawler/status")).json()).toMatchObject({ crawlersInThisProcess: [] });
     expect((await app.inject("/api/v2/resources/999")).statusCode).toBe(404);
     await app.close();
   });
@@ -174,6 +177,17 @@ describe("HTTP API", () => {
     expect(last).toBe(429);
     delete process.env.API_KEYS;
     delete process.env.RATE_LIMIT_PER_MIN;
+    await app.close();
+  });
+  it("allows a separate frontend origin when CORS_ORIGIN is configured", async () => {
+    process.env.CORS_ORIGIN = "https://my-frontend.example";
+    const app = await buildApp(config, { logger: false, legacy: false, corpusPath: ":memory:", crawler: false });
+    const pre = await app.inject({ method: "OPTIONS", url: "/api/v2/search?q=x", headers: { origin: "https://my-frontend.example", "access-control-request-method": "GET", "access-control-request-headers": "x-api-key" } });
+    expect(pre.headers["access-control-allow-origin"]).toBe("https://my-frontend.example");
+    expect(String(pre.headers["access-control-allow-headers"])).toContain("x-api-key");
+    const other = await app.inject({ method: "GET", url: "/api/v2/categories", headers: { origin: "https://evil.example" } });
+    expect(other.headers["access-control-allow-origin"]).toBeUndefined();
+    delete process.env.CORS_ORIGIN;
     await app.close();
   });
   it("does not expose legacy routes (incl. the removed person lookup) by default", async () => {

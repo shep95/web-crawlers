@@ -225,7 +225,7 @@ export async function analyzeResponse(
       runs.push({ id: tag, ms: Date.now() - t0, fields: collector.fields.length - before });
     } catch (err) {
       // Isolation: one malformed resource or failing source never aborts the whole record.
-      runs.push({ id: tag, ms: Date.now() - t0, fields: collector.fields.length - before, error: (err as Error).message.slice(0, 300) });
+      runs.push({ id: tag, ms: Date.now() - t0, fields: collector.fields.length - before, error: String((err as Error | undefined)?.message ?? err ?? "unknown error").slice(0, 300) });
     }
   };
   // HTML first (it populates shared plain text used by privacy/retention), then the rest in parallel.

@@ -6,10 +6,10 @@ Legend: ● found · ○ applicable but not present in this fixture · `·` not 
 
 | # | Category | HTML (rich) | JSON Schema | OpenAPI | Data Package | Model config.json | CSV | RSS feed | Sitemap | DataCite XML | Model card (MD) | CITATION.cff | security.txt | Email (.eml) | JPEG + EXIF | WAV audio | MP4 video | PDF | DOCX | Extractors declaring it | Fields observed |
 |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|---|---|
-| 1 | Descriptive | ● | ● | ● | ● | ○ | ● | ● | ○ | ● | ● | ● | ○ | ● | ○ | ○ | ○ | ● | ● | html, image, media-container, pdf, office, json, csv, xml, text, email, github, package-registry, crossref | title, description, author, keywords, language, generator, headline, columnNames, subject |
+| 1 | Descriptive | ● | ● | ● | ● | ○ | ● | ● | ○ | ● | ● | ● | ○ | ● | ○ | ○ | ○ | ● | ● | html, image, media-container, ocr, pdf, office, json, csv, xml, text, email, github, package-registry, crossref | title, description, author, keywords, language, generator, headline, columnNames, subject |
 | 2 | Structural | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ○ | ○ | ● | ● | ● | html, media-container, isobmff, pdf, office, json, csv, xml, text, email, archive | breadcrumbs, headingOutline, headingCount, tableCount, listCount, sectionCount, landmarks, tableHeaders, wordCount, rootType, endpoints, columnCount |
-| 3 | Administrative | ● | ○ | ○ | ○ | ○ | ○ | · | ○ | ○ | · | · | · | · | · | · | · | ○ | ● | html, office, json | maintainer, company |
-| 4 | Technical | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, image, media-container, isobmff, pdf, archive | httpStatus, mimeType, charset, sniffedType, bodyBytes, decodedCharset, delimiter, width, height, format, container, codec |
+| 3 | Administrative | ● | ○ | ○ | ○ | ○ | ○ | · | ○ | ○ | · | · | · | · | · | · | · | ○ | ● | html, pdf, office, json | maintainer, company |
+| 4 | Technical | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, image, media-container, isobmff, pdf, archive | distributionFormats, httpStatus, mimeType, charset, sniffedType, bodyBytes, decodedCharset, delimiter, width, height, format, container |
 | 5 | Preservation | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, pdf, archive, wayback | sha256 |
 | 6 | Rights & licensing | ● | ○ | ● | ● | ○ | ○ | ● | ○ | ● | ● | ● | ○ | ○ | ● | ○ | ○ | ○ | ○ | html, image, media-container, pdf, json, xml, text, github, huggingface, package-registry | rightsStatement, license, licenseUrl, copyright, termsUrl |
 | 7 | Access & security | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, html, pdf, json, text, tls | isAccessibleForFree, hasLoginForm, accessRequiresAuth, missingSecurityHeaders, transportEncrypted, securitySchemes, securityContact, securityPolicy, encrypted |
@@ -17,15 +17,15 @@ Legend: ● found · ○ applicable but not present in this fixture · `·` not 
 | 9 | Lineage | ● | ○ | ○ | ● | ○ | ○ | · | ○ | ○ | ● | ○ | ○ | · | · | · | · | · | · | html, json, text, huggingface, package-registry | derivedFrom, sources, baseModel |
 | 10 | Audit | ○ | ○ | ○ | ○ | ○ | · | ● | · | · | · | · | · | · | · | · | · | · | · | xml, github, package-registry | changeEntries |
 | 11 | Version | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, html, pdf, office, json, wayback, github, huggingface, package-registry | version, etag, revision |
-| 12 | Temporal | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, html, image, media-container, isobmff, pdf, office, json, xml, email, wayback, github, package-registry | published, modified, temporalCoverage, lastModifiedHeader, retrievedAt, created |
-| 13 | Spatial / geographic | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, image, json, xml | spatialCoverage, coordinates, placename, boundingBox |
-| 14 | Identity & identifiers | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ● | ○ | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, media-container, json, xml, text, crossref | identifier, doi, canonicalUrl, isbn, orcid, arxiv |
+| 12 | Temporal | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, html, image, media-container, isobmff, pdf, office, json, csv, xml, email, wayback, github, package-registry | published, modified, temporalCoverage, lastModifiedHeader, retrievedAt, created |
+| 13 | Spatial / geographic | ● | ○ | ○ | ○ | ○ | ● | ○ | ○ | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, image, json, csv, xml | spatialCoverage, coordinates, placename, namedPlaces, boundingBox |
+| 14 | Identity & identifiers | ● | ○ | ○ | ○ | ○ | ● | ○ | ○ | ● | ○ | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, media-container, ocr, pdf, json, csv, xml, text, crossref | identifier, doi, canonicalUrl, isbn, orcid, arxiv, identifierColumns |
 | 15 | Relational | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, email | internalLinkCount, externalLinkCount, outboundDomains |
-| 16 | Semantic | ● | ● | ○ | ○ | ○ | ○ | ○ | ● | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, json, xml | types, vocabularies, fieldDescriptions, xmlNamespaces |
+| 16 | Semantic | ● | ● | ○ | ○ | ○ | ● | ○ | ● | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | html, json, csv, xml | types, vocabularies, fieldDescriptions, units, xmlNamespaces |
 | 17 | Schema | ○ | ● | ● | ● | ● | ● | · | ● | ○ | · | · | · | · | · | · | · | · | · | json, csv, xml | schemaType, properties, apiPaths, models, columns, xsd |
 | 18 | Validation & constraints | ● | ● | ● | ● | ○ | ○ | · | ○ | ○ | · | · | · | · | · | · | · | · | · | html, json | formConstraints, required, enums, ranges, patterns, fieldConstraints, primaryKey |
-| 19 | Statistical | ● | ○ | ○ | ○ | ○ | ● | · | ○ | ○ | · | · | · | · | · | · | · | · | · | html, csv | variables, measurementTechnique, columnStats, sampleSize |
-| 20 | Data quality | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | csv | completeness, contradictionCount, extractorErrorCount, truncated, duplicatesCollapsed, nullRate, raggedRows |
+| 19 | Statistical | ● | ○ | ○ | ○ | ○ | ● | · | ○ | ○ | · | · | · | · | · | · | · | · | · | html, pdf, csv | variables, measurementTechnique, columnStats, sampleSize |
+| 20 | Data quality | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | csv | completeness, contradictionCount, extractorErrorCount, truncated, duplicatesCollapsed, nullRate, raggedRows, duplicateRate |
 | 21 | Business | ● | ○ | ○ | ○ | ○ | · | · | · | · | · | · | · | · | · | · | · | ○ | ● | html, office | organization, legalName, lei |
 | 22 | Operational | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, xml | available, ttfbMs, totalMs, observedPublishIntervalHours, refreshInterval |
 | 23 | Usage & analytics | ● | ○ | ○ | ○ | ○ | · | · | · | · | · | · | · | · | · | · | · | · | · | html, github, huggingface | interactionCounts |
@@ -33,19 +33,19 @@ Legend: ● found · ○ applicable but not present in this fixture · `·` not 
 | 25 | Discovery & indexing | ● | ○ | ○ | ○ | ○ | ○ | ● | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ | http, html, xml | robotsDirectives, feeds, feedFormat, sitemapType, sitemapEntries, sitemapSample |
 | 26 | Web & SEO | ● | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | html | structuredDataTypes, canonical, titleLength, descriptionLength, viewport, charsetDeclared, h1Count, hreflang |
 | 27 | Social sharing | ● | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | html | openGraph, twitterCard, previewImage |
-| 28 | File system | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, archive | filename, sizeBytes, serverModified, extension |
-| 29 | Image | · | · | · | · | · | · | · | · | · | · | · | · | · | ● | · | · | · | · | image | width, height, format, make, model |
+| 28 | File system | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, xml, archive | filename, sizeBytes, serverModified, extension |
+| 29 | Image | · | · | · | · | · | · | · | · | · | · | · | · | · | ● | · | · | · | · | image, ocr | width, height, format, make, model, ocrSkipped |
 | 30 | Audio | · | · | · | · | · | · | · | · | · | · | · | · | · | · | ● | ○ | · | · | media-container, isobmff | duration, codec, sampleRate, bitrate, channels, bitsPerSample, lossless |
 | 31 | Video | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · | ● | · | · | media-container, isobmff | duration, tracks, width, height, videoCodec, container |
 | 32 | Document | · | · | · | · | · | · | · | · | · | ○ | ○ | ○ | · | · | · | · | ● | ● | pdf, office | encrypted, linearized, pageCount, title, author, subject, keywords, application, wordCount, revision, lastModifiedBy |
 | 33 | Email | · | · | · | · | · | · | · | · | · | · | · | · | ● | · | · | · | · | · | email | messageId, from, to, subject, date, inReplyTo, references, receivedHops, dkim, authResults, mimeParts, attachmentNames |
 | 34 | Network & communications | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, email, dns, tls | remoteAddress, egress, redirectCount, declaredServers, relayHosts |
-| 35 | Device & sensor | ● | ○ | ○ | ○ | ○ | · | · | · | · | · | · | · | · | ● | ○ | ○ | · | · | html, image | instrument, deviceMake, deviceModel, firmware |
-| 36 | Scientific & experimental | ● | ○ | ○ | ○ | ○ | · | · | ○ | ○ | ○ | ● | ○ | · | · | · | · | ○ | · | html, text, crossref | citationTitle, authors, journal, publicationDate, citationFile |
+| 35 | Device & sensor | ● | ○ | ○ | ○ | ○ | · | · | · | · | · | · | · | · | ● | ○ | ○ | · | · | html, image, pdf | instrument, deviceMake, deviceModel, firmware |
+| 36 | Scientific & experimental | ● | ○ | ○ | ○ | ○ | · | · | ○ | ○ | ○ | ● | ○ | · | · | · | · | ○ | · | html, pdf, text, crossref | citationTitle, authors, journal, publicationDate, citationFile |
 | 37 | AI / machine learning | ○ | ○ | ○ | ○ | ● | · | · | · | · | ● | ○ | ○ | · | · | · | · | · | · | html, json, text, huggingface | architectures, modelType, hyperparameters, pipelineTag, libraryName, baseModel, datasets, metrics, evaluationResults, limitations |
-| 38 | Accessibility | ● | · | · | · | · | · | · | · | · | · | · | · | · | · | · | ● | ● | · | html, image, media-container, isobmff, pdf | accessibilityFeatures, documentLanguage, imagesTotal, imagesWithAlt, altCoverage, captionTracks, mediaElements, formInputs, labelledInputs, landmarks, skipLink, taggedPdf |
+| 38 | Accessibility | ● | · | · | · | · | · | · | · | · | · | · | · | · | · | · | ● | ● | · | html, image, media-container, isobmff, ocr, pdf | accessibilityFeatures, documentLanguage, imagesTotal, imagesWithAlt, altCoverage, captionTracks, mediaElements, formInputs, labelledInputs, landmarks, skipLink, taggedPdf |
 | 39 | Privacy & sensitivity | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ○ | ○ | ○ | ● | ○ | http, html, image, email, privacy | thirdPartyScriptDomains, privacyPolicyUrl, personalDataIndicators |
-| 40 | Retention & disposition | ● | ○ | ○ | ○ | ○ | · | · | · | · | ○ | ○ | ● | · | · | · | · | ○ | · | html, text | expires, retentionStatements |
+| 40 | Retention & disposition | ● | ○ | ○ | ○ | ○ | · | · | · | · | ○ | ○ | ● | · | · | · | · | ○ | · | html, pdf, text | expires, retentionStatements |
 | 41 | Authenticity & integrity | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | http, html, media-container, pdf, office, text, email, archive, tls, checksum-verify, package-registry | sriScripts, sha256, signed |
 
 ## Per-category status and limitations
@@ -64,10 +64,10 @@ Legend: ● found · ○ applicable but not present in this fixture · `·` not 
 | 10 | Audit | Verified (offline fixtures) | RSS feed | GitHub repositories only (public, unauthenticated, rate-limited). |
 | 11 | Version | Verified (offline fixtures) | HTML (rich), JSON Schema, OpenAPI, Data Package, Model config.json, CSV, RSS feed, Sitemap, DataCite XML, Model card (MD), CITATION.cff, security.txt, Email (.eml), JPEG + EXIF, WAV audio, MP4 video, PDF, DOCX | No cross-version diffing across stored history (service is stateless). |
 | 12 | Temporal | Verified (offline fixtures) | HTML (rich), JSON Schema, OpenAPI, Data Package, Model config.json, CSV, RSS feed, Sitemap, DataCite XML, Model card (MD), CITATION.cff, security.txt, Email (.eml), JPEG + EXIF, WAV audio, MP4 video, PDF, DOCX | Timestamps without a timezone are interpreted as UTC and marked in `original`. |
-| 13 | Spatial / geographic | Verified (offline fixtures) | HTML (rich), DataCite XML | EXIF GPS is rounded to ~1 km; locations are never inferred from unrelated signals. |
-| 14 | Identity & identifiers | Verified (offline fixtures) | HTML (rich), DataCite XML, CITATION.cff | ISBN/ISSN/ORCID are checksum-validated; alias resolution is not asserted. |
+| 13 | Spatial / geographic | Verified (offline fixtures) | HTML (rich), CSV, DataCite XML | EXIF GPS is rounded to ~1 km; locations are never inferred from unrelated signals. |
+| 14 | Identity & identifiers | Verified (offline fixtures) | HTML (rich), CSV, DataCite XML, CITATION.cff | ISBN/ISSN/ORCID are checksum-validated; alias resolution is not asserted. |
 | 15 | Relational | Verified (offline fixtures) | HTML (rich) | Relationships require explicit evidence; name similarity is never treated as identity. |
-| 16 | Semantic | Verified (offline fixtures) | HTML (rich), JSON Schema, Sitemap, DataCite XML | No ontology reasoning; reports declared terms only. |
+| 16 | Semantic | Verified (offline fixtures) | HTML (rich), JSON Schema, CSV, Sitemap, DataCite XML | No ontology reasoning; reports declared terms only. |
 | 17 | Schema | Verified (offline fixtures) | JSON Schema, OpenAPI, Data Package, Model config.json, CSV, Sitemap | Inferred CSV/JSON types are labelled inferred. |
 | 18 | Validation & constraints | Verified (offline fixtures) | HTML (rich), JSON Schema, OpenAPI, Data Package | Constraints are reported, not enforced against data. |
 | 19 | Statistical | Verified (offline fixtures) | HTML (rich), CSV | Column statistics are computed over the fetched sample (body cap) and labelled inferred. |

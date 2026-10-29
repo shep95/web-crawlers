@@ -1,5 +1,6 @@
 import { C } from "../categories.js";
 import { listZipEntries, readZipEntry } from "../zip.js";
+import { mineResearchText } from "./research-text.js";
 import type { ExtractionContext, Extractor } from "../extractor.js";
 import { clean, findIdentifiers, normalizeDate, splitKeywords } from "../normalize.js";
 
@@ -22,7 +23,7 @@ export const pdfExtractor: Extractor = {
   version: "1.0.0",
   description: "PDF Info dictionary, page count, version, encryption, XMP packet (incl. PDF/A), signature and tagging markers.",
   kinds: ["pdf"],
-  categories: [C.document, C.descriptive, C.technical, C.temporal, C.provenance, C.preservation, C.integrity, C.access_security, C.structural, C.accessibility, C.rights, C.version],
+  categories: [C.document, C.descriptive, C.technical, C.temporal, C.provenance, C.preservation, C.integrity, C.access_security, C.structural, C.accessibility, C.rights, C.version, C.statistical, C.scientific, C.device_sensor, C.administrative, C.retention, C.identifiers],
   timeoutMs: 8000,
   async run(ctx) {
     const body = ctx.response.body;
@@ -116,7 +117,7 @@ export const pdfExtractor: Extractor = {
     if (encrypted) return;
     try {
       const { extractText, getDocumentProxy } = await import("unpdf");
-      const proxy = await getDocumentProxy(new Uint8Array(body));
+      const proxy = await getDocumentProxy(new Uint8Array(body), { verbosity: 0, isEvalSupported: false, disableFontFace: true } as never);
       const { text } = await extractText(proxy, { mergePages: true });
       const plain = (Array.isArray(text) ? text.join("\n") : text).replace(/\s+/g, " ").trim().slice(0, 400_000);
       ctx.shared.set("plainText", plain);
@@ -129,15 +130,8 @@ export const pdfExtractor: Extractor = {
       const urls = [...new Set(plain.match(/https?:\/\/[^\s)>\]"']+[^\s)>\]"'.,;]/g) ?? [])].slice(0, 200);
       ctx.shared.set("references", urls.map((u) => ({ url: u, text: "", rel: "", region: "main", tag: "pdf-text", type: null })));
       for (const d of ids.doi.slice(0, 30)) ctx.relate("references", `https://doi.org/${d}`, `DOI ${d} cited in document text`, "pdf text");
-      const lic = plain.match(/(?:licensed under|license:|licence:)[^.]{0,120}\./i)?.[0];
-      if (lic) ctx.add(C.rights, "rightsStatement", clean(lic, 200), { method: "licence sentence in pdf text" });
-      const methods = plain.match(/\b(?:methodology|methods|sampling (?:design|frame|method)|data collection)\b[^.]{0,300}\./i)?.[0];
-      if (methods) {
-      ctx.add(C.statistical, "methodologyStatement", clean(methods, 400), { method: "methodology sentence in pdf text" });
-      ctx.add(C.scientific, "method", clean(methods, 400), { method: "methodology sentence in pdf text" });
-    }
-      const sample = plain.match(/\b(?:n\s*=\s*|sample size of\s*)([\d,]{2,9})/i)?.[1];
-      if (sample) ctx.add(C.statistical, "sampleSize", Number(sample.replace(/,/g, "")), { method: "sample size statement in pdf text", evidence: plain.match(/.{0,60}(?:n\s*=\s*|sample size of\s*)[\d,]{2,9}.{0,40}/i)?.[0] });
+      mineResearchText(ctx, plain, "pdf text");
+      ctx.add(C.retention, "retentionStatements", [...plain.matchAll(/[^.]{0,120}\b(?:retain(?:ed)?|retention)\b[^.]{0,80}\b\d{1,3}\s*(?:days?|months?|years?)\b[^.]{0,80}\./gi)].map((x) => clean(x[0], 240)).slice(0, 5), { method: "retention phrase in pdf text" });
     } catch (err) {
       ctx.add(C.document, "textExtraction", (err as Error).message.slice(0, 160), { status: "extraction_failed", method: "unpdf text layer" });
     }

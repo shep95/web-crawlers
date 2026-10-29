@@ -1,13 +1,11 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createRequire } from "node:module";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { request } from "undici";
-import { CorpusStore } from "../src/corpus/store.js";
+import type { Corpus } from "../src/corpus/types.js";
+import { backends } from "./helpers/backends.js";
 import { AutonomousCrawler } from "../src/corpus/crawler.js";
 import { searchCorpus, resourceDetail } from "../src/corpus/search.js";
 import type { DiscoverySource } from "../src/corpus/bootstrap.js";
@@ -123,146 +121,156 @@ const source = (): DiscoverySource => ({
   run: async () => [{ url: `${base}/catalog.xml`, priority: 60, depth: 0, via: "bootstrap:test_catalog", purpose: "bootstrap" }],
 });
 
-describe("autonomous crawler: discovery → retrieval → extraction → index → search", () => {
-  const dir = mkdtempSync(join(tmpdir(), "omni-"));
-  const dbPath = join(dir, "corpus.db");
-  let store: CorpusStore;
-  let clock = Date.parse("2026-10-29T12:00:00Z");
-  const mk = () => new AutonomousCrawler({ store, fetch: localFetch, robots: localRobots, sources: [source()], enrich: false, hostDelayMs: 0, concurrency: 3, now: () => clock, urlPolicy: (u) => ({ ok: u.startsWith(base) || u.startsWith("https://creativecommons.org"), reason: "outside test site" }) });
-  afterAll(() => {
-    store?.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("crawls from a bootstrap source alone (no user-supplied URLs) and inspects the underlying artifacts", async () => {
-    store = new CorpusStore(dbPath);
-    const crawler = mk();
-    await crawler.drain(200);
+for (const makeBackend of backends()) {
+  const backend = makeBackend();
+  describe(`autonomous crawler [${backend.name}]: discovery → retrieval → extraction → index → search`, () => {
+    let store: Corpus;
+    let clock = Date.parse("2026-10-29T12:00:00Z");
+    const mk = () => new AutonomousCrawler({ store, fetch: localFetch, robots: localRobots, sources: [source()], enrich: false, hostDelayMs: 0, concurrency: 3, now: () => clock, urlPolicy: (u) => ({ ok: u.startsWith(base) || u.startsWith("https://creativecommons.org"), reason: "outside test site" }) });
     const url = (p: string) => store.byUrl(`${base}${p}`);
-    const ds = url("/datasets/rainfall")!;
-    expect(ds.state).toBe("indexed");
-    // Each stage is tracked separately.
-    expect(ds.retrieved_at && ds.inspected_at && ds.extracted_at && ds.indexed_at).toBeTruthy();
-    // Followed references with explicit purposes from the dataset.
-    const purpose = (p: string) => url(p)?.purpose;
-    expect(purpose("/files/rainfall.csv")).toBe("artifact");
-    expect(purpose("/docs/methodology.pdf")).toBe("supporting:methodology");
-    expect(purpose("/schema/rainfall.schema.json")).toBe("supporting:schema");
-    expect(purpose("/license")).toBe("supporting:rights");
-    expect(purpose("/changelog.xml")).toBe("supporting:revision");
-    for (const p of ["/files/rainfall.csv", "/docs/methodology.pdf", "/schema/rainfall.schema.json", "/license", "/changelog.xml", "/media/gauge.jpg", "/media/sound.wav", "/media/flyover.mp4", "/messages/announcement.eml", "/models/README.md", "/files/bundle.zip"]) {
-      expect(url(p)?.state, p).toBe("indexed");
-    }
-  });
-
-  it("extracts metadata from the actual files, not just listings", () => {
-    const obs = (p: string, field: string) => {
-      const r = store.byUrl(`${base}${p}`)!;
-      return store.observationsFor(store.latestSnapshot(r.id)!.id).filter((f) => f.field === field);
+    const obs = async (p: string, field: string) => {
+      const r = (await url(p))!;
+      return (await store.observationsFor((await store.latestSnapshot(r.id))!.id)).filter((f) => f.field === field);
     };
-    expect(obs("/files/rainfall.csv", "columnStats")[0].evidenceType).toBe("inferred");
-    expect(obs("/docs/methodology.pdf", "sampleSize")[0].value).toBe(1250);
-    expect(String(obs("/docs/methodology.pdf", "methodologyStatement")[0].value)).toContain("sampling design");
-    expect(obs("/docs/methodology.pdf", "doi")[0].value).toEqual(["10.5555/rain.2025"]);
-    expect(obs("/docs/methodology.pdf", "author").map((f) => f.value)).toContain("Hydrology Unit");
-    expect(obs("/schema/rainfall.schema.json", "required")[0].value).toEqual(["name", "age"]);
-    expect(obs("/media/gauge.jpg", "deviceModel")[0]).toMatchObject({ value: "Model X1", evidenceType: "direct_extraction" });
-    expect(obs("/media/sound.wav", "sampleRate")[0].value).toBe(8000);
-    expect(obs("/media/flyover.mp4", "duration")[0].value).toBe(3);
-    expect(obs("/messages/announcement.eml", "from")[0].value).toBe("a***@sender.test");
-    expect(obs("/models/README.md", "pipelineTag")[0].value).toBe("text-classification");
-    expect(obs("/files/bundle.zip", "packaging")[0].value).toBe("BagIt");
-    // Archive entries are inspected as contained resources.
-    const entry = store.byUrl(`${base}/files/bundle.zip#entry=${encodeURIComponent("data/rainfall-2024.csv")}`)!;
-    expect(entry.state).toBe("indexed");
-    expect(entry.kind).toBe("csv");
+    afterAll(async () => {
+      await store?.close();
+      await backend.dispose();
+    });
+
+    it("crawls from a bootstrap source alone (no user-supplied URLs) and inspects the underlying artifacts", async () => {
+      hits.clear();
+      licenceText = "CC BY 4.0";
+      store = await backend.open();
+      await mk().drain(300);
+      const ds = (await url("/datasets/rainfall"))!;
+      expect(ds.state).toBe("indexed");
+      // Each stage is tracked separately.
+      expect(ds.retrieved_at && ds.inspected_at && ds.extracted_at && ds.indexed_at).toBeTruthy();
+      const purpose = async (p: string) => (await url(p))?.purpose;
+      expect(await purpose("/files/rainfall.csv")).toBe("artifact");
+      expect(await purpose("/docs/methodology.pdf")).toBe("supporting:methodology");
+      expect(await purpose("/schema/rainfall.schema.json")).toBe("supporting:schema");
+      expect(await purpose("/license")).toBe("supporting:rights");
+      expect(await purpose("/changelog.xml")).toBe("supporting:revision");
+      for (const p of ["/files/rainfall.csv", "/docs/methodology.pdf", "/schema/rainfall.schema.json", "/license", "/changelog.xml", "/media/gauge.jpg", "/media/sound.wav", "/media/flyover.mp4", "/messages/announcement.eml", "/models/README.md", "/files/bundle.zip"]) {
+        expect((await url(p))?.state, p).toBe("indexed");
+      }
+    });
+
+    it("extracts metadata from the actual files, not just listings", async () => {
+      expect((await obs("/files/rainfall.csv", "columnStats"))[0].evidenceType).toBe("inferred");
+      expect((await obs("/docs/methodology.pdf", "sampleSize"))[0].value).toBe(1250);
+      expect(String((await obs("/docs/methodology.pdf", "methodologyStatement"))[0].value)).toContain("sampling design");
+      expect((await obs("/docs/methodology.pdf", "doi"))[0].value).toEqual(["10.5555/rain.2025"]);
+      expect((await obs("/docs/methodology.pdf", "author")).map((f) => f.value)).toContain("Hydrology Unit");
+      expect((await obs("/schema/rainfall.schema.json", "required"))[0].value).toEqual(["name", "age"]);
+      expect((await obs("/media/gauge.jpg", "deviceModel"))[0]).toMatchObject({ value: "Model X1", evidenceType: "direct_extraction" });
+      expect((await obs("/media/sound.wav", "sampleRate"))[0].value).toBe(8000);
+      expect((await obs("/media/flyover.mp4", "duration"))[0].value).toBe(3);
+      expect((await obs("/messages/announcement.eml", "from"))[0].value).toBe("a***@sender.test");
+      expect((await obs("/models/README.md", "pipelineTag"))[0].value).toBe("text-classification");
+      expect((await obs("/files/bundle.zip", "packaging"))[0].value).toBe("BagIt");
+      const entry = (await store.byUrl(`${base}/files/bundle.zip#entry=${encodeURIComponent("data/rainfall-2024.csv")}`))!;
+      expect(entry.state).toBe("indexed");
+      expect(entry.kind).toBe("csv");
+    });
+
+    it("scopes site-wide statements separately from resource statements", async () => {
+      const lic = (await obs("/datasets/rainfall", "license")).filter((f) => f.category === 6);
+      expect(lic.find((f) => f.value === "CC BY-SA 4.0")?.scope).toBe("site");
+      expect(lic.find((f) => String(f.value).includes("/license"))?.scope).toBe("resource");
+    });
+
+    it("rejects traps, respects robots, collapses URL variants and flags duplicates", async () => {
+      expect(hits.get("/calendar")).toBeUndefined();
+      expect(hits.get("/page/99")).toBeUndefined();
+      expect(hits.get("/private/x")).toBeUndefined();
+      expect(hits.get("/datasets/rainfall")).toBe(1); // utm variant canonicalised
+      expect((await url("/mirror"))!.duplicate_of).toBe((await url("/datasets"))!.id);
+      const ev = (await store.eventsFor((await url("/datasets/rainfall"))!.id)).map((e) => `${e.type} ${e.detail}`).join("\n");
+      expect(ev).toMatch(/rejected .*calendar_trap/);
+      expect(ev).toMatch(/pagination_limit/);
+    });
+
+    it("records failed parsers truthfully without losing the resource", async () => {
+      const b = (await url("/docs/broken.pdf"))!;
+      expect(b.state).toBe("indexed");
+      const fields = await store.observationsFor((await store.latestSnapshot(b.id))!.id);
+      expect(fields.some((f) => f.category === 32 && f.status === "extraction_failed")).toBe(true);
+      expect(fields.some((f) => f.field === "sha256")).toBe(true);
+    });
+
+    it("learns URL-pattern yields and extractor reliability from its own outcomes", async () => {
+      const best = await store.topPatterns(50, "yield");
+      expect(best.length).toBeGreaterThan(5);
+      const csv = best.find((p) => p.key.endsWith("/files/*.csv"))!;
+      expect(csv).toMatchObject({ fetched: 1, indexed: 1 });
+      expect(csv.catsSum).toBeGreaterThan(10);
+      const ex = await store.extractorStats();
+      expect(ex.find((e) => e.id.startsWith("pdf@"))!.runs).toBeGreaterThanOrEqual(2);
+      expect(ex.find((e) => e.id.startsWith("html@"))!.errors).toBe(0);
+    });
+
+    it("answers ordinary questions from the collected corpus with fact sheets, evidence, supporting resources and gaps", async () => {
+      const res = await searchCorpus(store, "how was the rainfall data sampled?");
+      expect(res.total).toBeGreaterThan(0);
+      const pdf = res.results.find((r) => r.url === `${base}/docs/methodology.pdf`)!;
+      expect(pdf).toBeTruthy();
+      expect(pdf.evidence.some((e) => e.field === "methodologyStatement" && e.method && e.observedAt)).toBe(true);
+      expect(pdf.referencedBy.some((p) => p.url === `${base}/datasets/rainfall`)).toBe(true);
+
+      const ds = (await searchCorpus(store, "rainfall observations datasets license")).results.find((r) => r.url === `${base}/datasets/rainfall`)!;
+      expect(ds.facts.publisher.map((f) => f.value)).toContain("Basin Water Authority");
+      expect(ds.facts.spatialCoverage.map((f) => f.value)).toContain("River Basin North");
+      expect(ds.facts.license.some((f) => f.scope === "resource")).toBe(true);
+      expect(ds.facts.version.map((f) => f.value)).toContain("1.0");
+      // Methodology facts come from the linked supporting PDF, labelled with where they came from.
+      expect(ds.facts.methods.some((f) => f.via?.startsWith("supporting:methodology") && String(f.value).includes("sampling design"))).toBe(true);
+      expect(ds.supportingResources.some((s) => s.purpose === "supporting:methodology")).toBe(true);
+
+      const gaps = await searchCorpus(store, "rainfall camera exif");
+      const csvHit = gaps.results.find((r) => r.kind === "csv");
+      if (csvHit) expect(csvHit.gaps.find((g) => g.category === 29)?.state).toBe("not_applicable");
+    });
+
+    it("covers all 41 categories with real observations across the crawled corpus", async () => {
+      expect((await store.stats()).categoriesObserved).toBe(41);
+      const detail = (await resourceDetail(store, (await url("/files/rainfall.csv"))!.id))!;
+      expect(detail.categories).toHaveLength(41);
+      expect(detail.categories.find((c) => c.id === 29)!.state).toBe("not_applicable");
+      expect(detail.categories.find((c) => c.id === 17)!.state).toBe("observed");
+    });
+
+    it("detects version changes on revisit and uses conditional requests for unchanged resources", async () => {
+      licenceText = "CC BY-NC 4.0";
+      clock += 8 * 86400_000;
+      await mk().drain(300);
+      const ds = (await url("/datasets/rainfall"))!;
+      expect(ds.snapshot_count).toBe(2);
+      expect(ds.change_count).toBe(1);
+      const change = (await obs("/datasets/rainfall", "changedSinceLastSnapshot"))[0];
+      expect((change.value as { fields: string[] }).fields).toEqual(expect.arrayContaining(["11.version"]));
+      const csv = (await url("/files/rainfall.csv"))!;
+      expect((await store.eventsFor(csv.id)).some((e) => e.type === "not_modified")).toBe(true);
+      expect(csv.snapshot_count).toBe(1);
+    });
+
+    it("recovers abandoned work after a restart", async () => {
+      await store.enqueue([{ url: `${base}/privacy?x=1`, priority: 999, depth: 1, via: "test", purpose: "discovery" }], clock);
+      const leased = await store.lease(1, 60_000, clock);
+      expect(leased[0].url).toBe(`${base}/privacy?x=1`);
+      await store.close(); // simulated crash with a lease outstanding
+      store = await backend.reopen();
+      expect((await url("/privacy?x=1"))!.state).toBe("leased");
+      clock += 2 * 60_000; // the dead worker's lease expires (multi-replica safe semantics)
+      const crawler = mk();
+      crawler.start();
+      await new Promise((r) => setTimeout(r, 400));
+      await crawler.stop();
+      await mk().drain(20);
+      const rec = (await url("/privacy?x=1"))!;
+      expect(rec.state).toBe("indexed");
+      expect(((await store.stats()).recentEvents as Array<{ type: string }>).some((e) => e.type === "lease_recovery")).toBe(true);
+    });
   });
-
-  it("scopes site-wide statements separately from resource statements", () => {
-    const ds = store.byUrl(`${base}/datasets/rainfall`)!;
-    const lic = store.observationsFor(store.latestSnapshot(ds.id)!.id).filter((f) => f.category === 6 && f.field === "license");
-    expect(lic.find((f) => f.value === "CC BY-SA 4.0")?.scope).toBe("site");
-    expect(lic.find((f) => String(f.value).includes("/license"))?.scope).toBe("resource");
-  });
-
-  it("rejects traps, respects robots, collapses URL variants and flags duplicates", () => {
-    expect(hits.get("/calendar")).toBeUndefined();
-    expect(hits.get("/page/99")).toBeUndefined();
-    expect(hits.get("/private/x")).toBeUndefined();
-    expect(hits.get("/datasets/rainfall")).toBe(1); // utm variant canonicalised
-    const mirror = store.byUrl(`${base}/mirror`)!;
-    expect(mirror.duplicate_of).toBe(store.byUrl(`${base}/datasets`)!.id);
-    const ev = store.eventsFor(store.byUrl(`${base}/datasets/rainfall`)!.id).map((e) => `${e.type} ${e.detail}`).join("\n");
-    expect(ev).toMatch(/rejected .*calendar_trap/);
-    expect(ev).toMatch(/pagination_limit/);
-  });
-
-  it("records failed parsers truthfully without losing the resource", () => {
-    const b = store.byUrl(`${base}/docs/broken.pdf`)!;
-    expect(b.state).toBe("indexed");
-    const fields = store.observationsFor(store.latestSnapshot(b.id)!.id);
-    expect(fields.some((f) => f.category === 32 && f.status === "extraction_failed"), JSON.stringify(fields.filter((f) => [4, 32].includes(f.category)).map((f) => [f.field, f.value, f.status]))).toBe(true);
-    expect(fields.some((f) => f.field === "sha256")).toBe(true);
-  });
-
-  it("answers ordinary questions from the collected corpus with evidence, supporting resources and gaps", () => {
-    const res = searchCorpus(store, "how was the rainfall data sampled?");
-    expect(res.total).toBeGreaterThan(0);
-    const top = res.results.map((r) => r.url);
-    expect(top).toContain(`${base}/docs/methodology.pdf`);
-    const pdf = res.results.find((r) => r.url === `${base}/docs/methodology.pdf`)!;
-    expect(pdf.evidence.some((e) => e.field === "methodologyStatement" && e.method && e.observedAt)).toBe(true);
-    expect(pdf.referencedBy.some((p) => (p as { url: string }).url === `${base}/datasets/rainfall`)).toBe(true);
-
-    const lic = searchCorpus(store, "rainfall observations license");
-    const ds = lic.results.find((r) => r.url === `${base}/datasets/rainfall`)!;
-    expect(ds.evidence.some((e) => e.category === 6)).toBe(true);
-    expect(ds.supportingResources.some((s) => (s as { purpose: string }).purpose === "supporting:methodology")).toBe(true);
-
-    const gaps = searchCorpus(store, "rainfall camera exif");
-    const csvHit = gaps.results.find((r) => r.kind === "csv");
-    if (csvHit) expect(csvHit.gaps.find((g) => g.category === 29)?.state).toBe("not_applicable");
-  });
-
-  it("covers all 41 categories with real observations across the crawled corpus", () => {
-    const seen = new Set((store.db.prepare(`SELECT DISTINCT category FROM observations`).all() as Array<{ category: number }>).map((r) => r.category));
-    expect(CATEGORIES.filter((c) => !seen.has(c.id)).map((c) => `${c.id}:${c.key}`).join(",")).toEqual("");
-    // Every stored resource reports all 41 categories with a truthful state.
-    const detail = resourceDetail(store, store.byUrl(`${base}/files/rainfall.csv`)!.id)!;
-    expect(detail.categories).toHaveLength(41);
-    expect(detail.categories.find((c) => c.id === 29)!.state).toBe("not_applicable");
-    expect(detail.categories.find((c) => c.id === 17)!.state).toBe("observed");
-  });
-
-  it("detects version changes on revisit and uses conditional requests for unchanged resources", async () => {
-    licenceText = "CC BY-NC 4.0"; // dataset page changes
-    clock += 8 * 86400_000; // revisit window elapsed
-    const crawler = mk();
-    await crawler.drain(200);
-    const ds = store.byUrl(`${base}/datasets/rainfall`)!;
-    expect(ds.snapshot_count).toBe(2);
-    expect(ds.change_count).toBe(1);
-    const change = store.observationsFor(store.latestSnapshot(ds.id)!.id).find((f) => f.field === "changedSinceLastSnapshot")!;
-    expect((change.value as { fields: string[] }).fields).toEqual(expect.arrayContaining(["11.version"]));
-    const csv = store.byUrl(`${base}/files/rainfall.csv`)!;
-    expect(store.eventsFor(csv.id).some((e) => e.type === "not_modified")).toBe(true);
-    expect(csv.snapshot_count).toBe(1);
-  });
-
-  it("recovers abandoned work after a restart", async () => {
-    store.enqueue([{ url: `${base}/privacy?x=1`, priority: 99, depth: 1, via: "test", purpose: "discovery" }], clock);
-    const leased = store.lease(1, 60_000, clock);
-    expect(leased[0].state).toBe("queued"); // row snapshot before lease
-    store.close(); // simulated crash with a lease outstanding
-    store = new CorpusStore(dbPath);
-    expect(store.byUrl(`${base}/privacy?x=1`)!.state).toBe("leased");
-    const crawler = mk();
-    crawler.start(); // start() recovers leases
-    await new Promise((r) => setTimeout(r, 300));
-    await crawler.stop();
-    await mk().drain(20);
-    const rec = store.byUrl(`${base}/privacy?x=1`)!;
-    expect(rec.state, JSON.stringify({ rec, ev: store.eventsFor(rec.id) })).toBe("indexed");
-    expect(store.stats().recentEvents.some((e) => (e as { type: string }).type === "lease_recovery")).toBe(true);
-  });
-});
+}

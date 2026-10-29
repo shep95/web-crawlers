@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { CATEGORIES } from "../metadata/categories.js";
+import { CATEGORIES, CATEGORY_EXTENSIONS } from "../metadata/categories.js";
 import { EXTRACTORS } from "../metadata/extractors/index.js";
 import { AnalysisError, analysisSlots, analyzeUpload, analyzeUrl, PIPELINE_VERSION } from "../metadata/pipeline.js";
 import type { ResourceRecord } from "../metadata/types.js";
@@ -10,6 +10,7 @@ import { crawlSite } from "../crawl/site-crawler.js";
 import { detectChanges } from "../crawl/changes.js";
 import { getEgressMode } from "../net/safe-fetch.js";
 import { ApiKeys, ClientRateLimiter, LatencyStats, openSse } from "./guards.js";
+import { openApiSpec } from "./openapi.js";
 
 const bool = z.union([z.boolean(), z.enum(["true", "false", "1", "0"]).transform((v) => v === "true" || v === "1")]);
 const AnalyzeQuery = z.object({
@@ -68,7 +69,7 @@ export async function registerV2(app: FastifyInstance, deps: V2Deps) {
     general.stop();
     heavy.stop();
   });
-  const open = new Set(["/api/v2/categories", "/api/v2/extractors", "/api/v2/providers", "/api/v2/info", "/api/v2/crawler/pause", "/api/v2/crawler/resume"]);
+  const open = new Set(["/api/v2/openapi.json", "/api/v2/categories", "/api/v2/extractors", "/api/v2/providers", "/api/v2/info", "/api/v2/crawler/pause", "/api/v2/crawler/resume"]);
   const heavyRoutes = new Set(["/api/v2/crawl/stream", "/api/v2/changes", "/api/v2/analyze/upload"]);
 
   app.addHook("onRequest", async (req, reply) => {
@@ -99,7 +100,10 @@ export async function registerV2(app: FastifyInstance, deps: V2Deps) {
     extractors: EXTRACTORS.length,
     providers: PROVIDERS.length,
   }));
-  app.get("/api/v2/categories", async () => ({ count: CATEGORIES.length, categories: CATEGORIES }));
+  app.get("/api/v2/openapi.json", async (req) => openApiSpec(process.env.PUBLIC_URL ?? `${req.protocol}://${req.headers.host ?? "localhost"}`));
+  // Static registry responses are serialised once.
+  const categoriesJson = JSON.stringify({ count: CATEGORIES.length, categories: CATEGORIES.map((c) => ({ ...c, supportingDiscovery: CATEGORY_EXTENSIONS[c.id].supportingDiscovery?.source ?? null, validation: CATEGORY_EXTENSIONS[c.id].validation })) });
+  app.get("/api/v2/categories", async (_req, reply) => reply.header("cache-control", "public, max-age=3600").type("application/json; charset=utf-8").send(categoriesJson));
   app.get("/api/v2/extractors", async () => ({
     count: EXTRACTORS.length,
     extractors: EXTRACTORS.map((e) => ({ id: e.id, version: e.version, description: e.description, kinds: e.kinds, categories: e.categories, needsNetwork: Boolean(e.needsNetwork), phase: e.phase ?? "local", timeoutMs: e.timeoutMs })),

@@ -35,40 +35,46 @@ Crawling had been treated as **collecting URLs and titles**. That is discovery i
 4. stores each observation with evidence and indexes contents + metadata together;
 5. answers questions from that corpus.
 
-## 4. Completion ledger
+## 4. Defects found during this work (all fixed, each with a regression test)
 
-Statuses: **Verified complete** (implemented and tested) · **Implemented, unverified** (code exists, required verification not yet run) · **Blocked** · **Not implemented**.
+| Defect | Found by | Fix |
+|---|---|---|
+| Process crash on first Railway deploy: destroying an undici body emits an unhandled `error` | Railway runtime logs | listeners before destroy; `tests/safe-fetch-live.test.ts` reproduces the crash without the fix |
+| Tesseract WASM abort on undecodable images surfaced as an unhandled error and poisoned the shared worker | OCR test | decode pre-check, worker `errorHandler`, discard failed workers |
+| Discovery purpose lost when the extractor had already recorded the same edge | snowfall scenario | edges merge purpose/scope on conflict (both backends) |
+| Archive entries released the parent's host lease (concurrent requests to one host) | review while tracing a flaky test | entries update stage without releasing the host |
+| Search: ranking every OR-match (seq scan), `stats()` per request, N+1 queries, cache stampedes → ~4 req/s | load test + EXPLAIN | AND-first ranking, cached stats, batched loads, single-flight → ~970 req/s cold |
+| Rate limiter kept a per-request timestamp log (O(requests) per check) | load test | O(1) sliding-window counter |
+| Any-term fallback flattened scores; type words ("datasets") required as text | snowfall scenario | order-preserving fallback; type words drive a type boost instead |
+| MP4 video tracks misread as audio by music-metadata; epoch-zero container dates reported as 1904 | MP4 fixture | dedicated ISO-BMFF box parser; unset dates rejected |
+| pdf-lib accepted garbage silently; CSV statistics counted empty cells as 0; compressed Content-Length used as file size | fixtures | explicit extraction_failed; empty cells excluded; decoded size |
+
+## 5. Completion ledger
+
+Statuses: **Verified complete** (implemented and tested) · **Implemented, unverified** (code exists, required verification not run) · **Blocked** · **Not implemented**.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| 41-category registry with applicability, methods, schema, limitations | Verified complete | `tests/metadata-pipeline.test.ts` (registry), `docs/COVERAGE.md` |
-| Every category observed from real artifacts (offline fixtures) | Verified complete | `tests/coverage.test.ts` |
-| Every category observed in an autonomous crawl | Verified complete | `tests/autonomous-crawler.test.ts` → "covers all 41 categories" |
-| Truthful availability states per resource | Verified complete | not-applicable / extraction-failed / unavailable assertions |
-| Evidence types, scope, original vs normalised values | Verified complete | site-vs-resource licence scope test; date tests |
-| Autonomous discovery without user URLs (bootstrap → frontier) | Verified complete (local) | e2e test starts from a bootstrap source only |
-| Purpose-driven following of supporting material | Verified complete | methodology/schema/rights/revision purposes asserted |
-| Separate stage tracking (retrieved/inspected/extracted/indexed) | Verified complete | e2e test |
-| Trap / budget / robots / canonicalisation controls | Verified complete | calendar, pagination, robots, utm-variant assertions |
-| Duplicate content detection | Verified complete | mirror page linked as duplicate, not indexed twice |
-| Version changes, conditional revisits (304) | Verified complete | revisit test (changed fields + `not_modified`) |
-| Failed parsers recorded without losing the resource | Verified complete | broken PDF test |
-| Restart recovery | Verified complete | simulated crash with outstanding lease |
-| Archive inspection (zip/tar/tgz, BagIt, nested entries) | Verified complete | e2e bundle.zip test |
-| PDF text layer, attachments | Verified complete (text) / Implemented, unverified (attachments) | methodology PDF test |
-| Image OCR | Not implemented | images without embedded text metadata report text as unavailable |
-| Selective browser rendering for JS-only pages | Not implemented in the new crawler | static retrieval only; legacy Playwright engine remains in legacy path |
-| Search over collected corpus with evidence + gaps | Verified complete | e2e search assertions |
-| Topical discovery from questions (APIs used only to find resources) | Implemented, unverified live | sandbox egress blocks those APIs |
-| Bootstrap sources (Data.gov, Zenodo, HF Hub, Commons, Internet Archive, arXiv, HN, sitemaps/feeds) | Implemented, unverified live until deployment | parsers unit-tested for search providers; live check pending |
-| Network enrichment (DNS, TLS, Wayback, Crossref, GitHub, HF, PyPI/npm) | Implemented, partially verified | PyPI verified live from sandbox; others require direct egress |
-| SSRF guard | Verified complete | `tests/security-normalize.test.ts` |
-| API auth, rate limits, validation, security headers | Verified complete | `tests/crawl-api.test.ts` |
-| Railway deployment | See README / commit log | updated after deployment |
+| 41-category registry: applicability, methods, core + extended fields, discovery rules, validation | Verified complete | `tests/metadata-pipeline.test.ts`, `GET /api/v2/categories` |
+| Every category observed from real artifacts | Verified complete | `tests/coverage.test.ts`, `docs/COVERAGE.md`, e2e "covers all 41" on both backends |
+| Truthful availability states, evidence types, scope | Verified complete | e2e + scenario tests |
+| Autonomous discovery without user URLs | Verified complete (local); live on Railway | e2e/scenario tests start from bootstrap sources only; production logs show live PDFs being processed |
+| Standalone files (S3/GCS/autoindex/IA manifests, Common Crawl index) | Verified complete (local, CC API mocked at HTTP boundary) | `tests/standalone-files.test.ts` |
+| Purpose-driven supporting material + scope | Verified complete | scenario + e2e |
+| Stage tracking, traps, robots, duplicates, revisits, version diffs, failed parsers, restart recovery | Verified complete | `tests/autonomous-crawler.test.ts` (SQLite + Postgres) |
+| Multiple crawler replicas on one frontier | Verified complete | `tests/multi-crawler.test.ts` (4 replicas, 8 hosts, 120 resources) |
+| Learned URL-pattern yields, extractor reliability, gap pursuit | Verified complete (learning recorded; priority effect unit-level) | e2e "learns URL-pattern yields" |
+| OCR (Tesseract, bundled model) | Verified complete | `tests/ocr-render.test.ts` |
+| Selective JS rendering | Verified complete where Chromium exists (CI image may skip) | `tests/ocr-render.test.ts` |
+| Search with fact sheets, evidence, supporting facts, gaps | Verified complete | scenario test |
+| Search performance | Measured | README table (single 4-vCPU box) |
+| OpenAPI + CORS for frontend | Verified complete | `tests/crawl-api.test.ts` |
+| Bootstrap sources against live public APIs | Implemented; live results visible only via Railway logs/heartbeat | sandbox egress blocks those hosts |
+| Railway multi-service (Postgres + api + crawler) | See deployment notes in the final report | — |
+| Cryptographic verification of PDF/DKIM/OOXML signatures | Not implemented (presence detected only) | — |
 
-## 5. Known limitations
+## 6. Known limitations
 
-* Single-writer SQLite: one replica. Horizontal scaling would need Postgres + a shared queue.
-* No OCR, no JS rendering in the autonomous crawler.
-* Cross-source corroboration exists for DOIs (Crossref); broader claim reconciliation across sources is not implemented.
-* Signatures (PDF/DKIM/OOXML) are detected, not cryptographically verified.
+* Capacity is horizontal (API replicas, crawler replicas, Postgres read replicas, CDN); claims about specific user counts require load tests at that scale.
+* Cross-source claim reconciliation exists for DOIs (Crossref corroboration) only.
+* OCR is English-only by default.

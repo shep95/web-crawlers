@@ -148,6 +148,32 @@ export const jsonExtractor: Extractor = {
       return;
     }
     // CKAN package_show / DCAT-ish dataset JSON
+    // Internet Archive item manifest (archive.org/metadata/<id>): each file is a standalone resource.
+    if (isObj(d.metadata) && Array.isArray(d.files) && typeof d.dir === "string") {
+      const md = d.metadata;
+      const id = str(md.identifier) ?? "";
+      ctx.add(C.descriptive, "title", clean(md.title), { method: "ia metadata.title" });
+      ctx.add(C.descriptive, "description", clean(Array.isArray(md.description) ? md.description[0] : md.description, 1000), { method: "ia metadata.description" });
+      ctx.add(C.descriptive, "author", Array.isArray(md.creator) ? md.creator.map(String) : md.creator ? [String(md.creator)] : [], { method: "ia metadata.creator" });
+      ctx.add(C.rights, "licenseUrl", str(md.licenseurl), { method: "ia metadata.licenseurl" });
+      ctx.add(C.identifiers, "identifier", id ? [`ia:${id}`] : [], { method: "ia metadata.identifier" });
+      ctx.add(C.administrative, "collectionOwner", Array.isArray(md.collection) ? md.collection.map(String).join(", ") : str(md.collection), { method: "ia metadata.collection" });
+      const files = (d.files as Json[]).filter((f) => f.source === "original" && typeof f.name === "string").slice(0, 200);
+      ctx.add(C.structural, "entryCount", files.length, { method: "ia files[] (originals)" });
+      ctx.add(C.integrity, "publishedChecksums", files.slice(0, 50).map((f) => ({ file: f.name, md5: f.md5 ?? null, sha1: f.sha1 ?? null })), { method: "ia files[].md5/sha1", evidence: "publisher-provided digests for each file" });
+      ctx.add(C.preservation, "archived", true, { method: "Internet Archive item" });
+      ctx.shared.set("references", files.filter((f) => Number(f.size ?? 0) < 40_000_000).map((f) => ({ url: `https://archive.org/download/${encodeURIComponent(id)}/${String(f.name).split("/").map(encodeURIComponent).join("/")}`, text: `${f.format ?? ""} ${f.name}`, rel: "", region: "main", tag: "listing", type: str(f.format) })));
+      return;
+    }
+    // Google Cloud Storage public object listing.
+    if (d.kind === "storage#objects" && Array.isArray(d.items)) {
+      const items = (d.items as Json[]).slice(0, 1000);
+      ctx.add(C.structural, "entryCount", items.length, { method: "gcs objects.list" });
+      ctx.add(C.file_system, "listing", items.slice(0, 100).map((o) => ({ name: o.name, size: Number(o.size), contentType: o.contentType, updated: o.updated })), { method: "gcs objects.list", evidence: "source-reported object properties" });
+      ctx.add(C.integrity, "publishedChecksums", items.slice(0, 50).map((o) => ({ file: o.name, md5Base64: o.md5Hash ?? null, crc32c: o.crc32c ?? null })), { method: "gcs md5Hash/crc32c" });
+      ctx.shared.set("references", items.filter((o) => typeof o.mediaLink === "string" && Number(o.size ?? 0) < 40_000_000).map((o) => ({ url: String(o.mediaLink), text: String(o.name), rel: "", region: "main", tag: "listing", type: str(o.contentType) })));
+      return;
+    }
     const pkg = isObj(d.result) && (d.result.resources || d.result.notes) ? d.result : d.notes !== undefined && Array.isArray(d.resources) ? d : null;
     if (pkg) {
       ctx.add(C.schema, "schemaType", "CKAN package", { method: "ckan package fields" });
@@ -221,12 +247,14 @@ function inferType(values: string[]): string {
   return "string";
 }
 
+const r_nonEmpty = (a: number, b: number) => !(a === 0 && b === 0);
+
 export const csvExtractor: Extractor = {
   id: "csv",
   version: "1.0.0",
   description: "Delimited text: dialect detection, header, inferred column types, null rates and numeric statistics over the fetched sample.",
   kinds: ["csv"],
-  categories: [C.schema, C.structural, C.statistical, C.quality, C.descriptive],
+  categories: [C.schema, C.structural, C.statistical, C.quality, C.descriptive, C.semantic, C.identifiers, C.spatial, C.temporal],
   timeoutMs: 4000,
   async run(ctx) {
     const text = (await ctx.text()).replace(/^﻿/, "");
@@ -267,6 +295,38 @@ export const csvExtractor: Extractor = {
     const cells = rows.length * header.length;
     ctx.add(C.quality, "nullRate", cells ? Number((nulls / cells).toFixed(4)) : null, { status: "observed", method: "empty/NA cells ÷ cells" });
     ctx.add(C.quality, "raggedRows", ragged, { status: "observed", method: "rows whose width ≠ header width" });
+    const rowKeys = rows.map((r) => r.join("\u0001"));
+    const dupRows = rowKeys.length - new Set(rowKeys).size;
+    ctx.add(C.quality, "duplicateRate", rows.length ? Number((dupRows / rows.length).toFixed(4)) : 0, { status: "observed", method: "identical rows ÷ rows", evidence: `${dupRows} duplicate row(s)` });
+
+    // Units declared in column headers: "snowfall_cm", "temp (°C)", "depth [m]".
+    const UNIT_SUFFIX = /(?:[\s_(\[]|^)(mm|cm|m|km|kg|g|mg|l|ml|°c|degc|celsius|°f|fahrenheit|k|kelvin|pa|hpa|kpa|mb|mbar|%|pct|percent|ppm|ppb|m\/s|km\/h|mph|kwh|mw|kw|w|usd|eur|inr|gbp|hours?|hrs?|days?|years?|min|sec|s)[\])]?$/i;
+    const units = header.map((h) => ({ column: h, unit: h.match(UNIT_SUFFIX)?.[1] ?? null })).filter((u) => u.unit);
+    ctx.add(C.semantic, "units", units, { status: "inferred", method: "unit token in column header", evidence: "units read from header names, not from a published codebook" });
+
+    // Identifier columns.
+    const idCols = header.filter((h) => /(^|_|\b)(id|uuid|code|identifier|doi|isbn|station(_?id)?)$/i.test(h));
+    ctx.add(C.identifiers, "identifierColumns", idCols, { status: "inferred", method: "column-name pattern" });
+
+    // Geographic coverage computed from coordinate columns (a measurement of the data, not a claim).
+    const latI = header.findIndex((h) => /^(lat|latitude|y)$/i.test(h.trim()));
+    const lonI = header.findIndex((h) => /^(lon|lng|long|longitude|x)$/i.test(h.trim()));
+    if (latI >= 0 && lonI >= 0) {
+      const pts = rows.map((r) => [Number(r[latI]), Number(r[lonI])]).filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a) <= 90 && Math.abs(b) <= 180 && r_nonEmpty(a, b));
+      if (pts.length) {
+        const lats = pts.map((p) => p[0]);
+        const lons = pts.map((p) => p[1]);
+        ctx.add(C.spatial, "boundingBox", { south: Math.min(...lats), north: Math.max(...lats), west: Math.min(...lons), east: Math.max(...lons), points: pts.length }, { status: "observed", method: "computed from latitude/longitude columns", evidenceType: "system_measurement" });
+      }
+    }
+    const placeI = header.findIndex((h) => /^(station|site|location|place|city|district|region|state|country|name)$/i.test(h.trim()));
+    if (placeI >= 0) ctx.add(C.spatial, "namedPlaces", [...new Set(rows.map((r) => r[placeI]).filter(Boolean))].slice(0, 30), { method: `values of column "${header[placeI]}"`, evidence: "place names listed in the data" });
+    // Temporal coverage computed from date columns.
+    const dateI = columns.findIndex((c) => c.type === "date");
+    if (dateI >= 0) {
+      const ds = rows.map((r) => normalizeDate(r[dateI])?.iso).filter(Boolean).sort() as string[];
+      if (ds.length) ctx.add(C.temporal, "temporalCoverage", `${ds[0].slice(0, 10)}/${ds[ds.length - 1].slice(0, 10)}`, { status: "observed", method: `range of column "${header[dateI]}"`, evidenceType: "system_measurement" });
+    }
     const dupHeader = header.length - new Set(header).size;
     if (dupHeader) ctx.add(C.quality, "duplicateColumnNames", dupHeader, { status: "observed", method: "header uniqueness" });
   },
@@ -279,7 +339,7 @@ export const xmlExtractor: Extractor = {
   version: "1.0.0",
   description: "XML: root/namespaces/XSD, sitemaps, RSS/Atom feeds, Dublin Core/DataCite/EML records.",
   kinds: ["xml", "feed"],
-  categories: [C.semantic, C.schema, C.discovery, C.descriptive, C.temporal, C.structural, C.operational, C.audit, C.identifiers, C.rights, C.spatial],
+  categories: [C.semantic, C.schema, C.discovery, C.descriptive, C.temporal, C.structural, C.operational, C.audit, C.identifiers, C.rights, C.spatial, C.file_system],
   timeoutMs: 4000,
   async run(ctx) {
     const $ = await ctx.dom();
@@ -336,6 +396,24 @@ export const xmlExtractor: Extractor = {
       const ttl = T("channel > ttl") ?? T("sy\\:updatePeriod");
       if (ttl) ctx.add(C.operational, "refreshInterval", ttl, { method: "ttl|sy:updatePeriod" });
       ctx.add(C.discovery, "feedFormat", atom ? "Atom" : rootName === "rss" ? `RSS ${attrs.version ?? ""}`.trim() : "RSS 1.0 (RDF)", { status: "observed", method: "feed root" });
+      return;
+    }
+    // S3-compatible public bucket listing (ListBucketResult): every key is a standalone file.
+    if (rootName === "listbucketresult") {
+      const bucketBase = (() => {
+        const u = new URL(ctx.response.finalUrl);
+        u.search = "";
+        return u.toString().replace(/\/?$/, "/");
+      })();
+      const contents = $("Contents").map((_, el) => ({ key: $(el).find("Key").text(), size: Number($(el).find("Size").text()), modified: normalizeDate($(el).find("LastModified").text())?.iso ?? null, etag: $(el).find("ETag").text().replace(/"/g, "") })).get();
+      ctx.add(C.structural, "entryCount", contents.length, { status: "observed", method: "ListBucketResult/Contents" });
+      ctx.add(C.file_system, "listing", contents.slice(0, 100), { method: "ListBucketResult", evidence: "source-reported object keys, sizes and modification times" });
+      ctx.add(C.discovery, "storageListing", { bucket: T("Name"), truncated: T("IsTruncated") === "true" }, { method: "ListBucketResult" });
+      const files = contents.filter((c) => c.key && !c.key.endsWith("/") && c.size < 40_000_000);
+      const refs = files.map((c) => ({ url: bucketBase + c.key.split("/").map(encodeURIComponent).join("/"), text: c.key, rel: "", region: "main", tag: "listing", type: null as string | null }));
+      const next = T("NextContinuationToken");
+      if (T("IsTruncated") === "true" && next) refs.push({ url: `${bucketBase}?list-type=2&continuation-token=${encodeURIComponent(next)}`, text: "next listing page", rel: "next", region: "main", tag: "listing", type: "listing" });
+      ctx.shared.set("references", refs);
       return;
     }
     // DataCite / Dublin Core / generic records

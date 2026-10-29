@@ -373,3 +373,68 @@ export const C = Object.fromEntries(CATEGORIES.map((c) => [c.key, c.id])) as Rec
   email: 33; network: 34; device_sensor: 35; scientific: 36; ai_ml: 37; accessibility: 38;
   privacy: 39; retention: 40; integrity: 41;
 };
+
+// ---------------------------------------------------------------------------
+// Extended registry: sub-domains from the specification, supporting-source
+// discovery rules (which references can supply a missing category — used for
+// bounded gap pursuit by the crawler), and validation checks.
+// ---------------------------------------------------------------------------
+
+export interface CategoryExtension {
+  /** Extended sub-domains this category covers beyond its core fields. */
+  extended: Record<string, FieldType>;
+  /** URL / anchor-text pattern of references likely to supply this category when it is missing. */
+  supportingDiscovery: RegExp | null;
+  /** Human-readable validation checks applied to values in this category. */
+  validation: string[];
+}
+
+export const CATEGORY_EXTENSIONS: Record<number, CategoryExtension> = {
+  1: { extended: { contentSummary: "string", creatorRole: "array", alternativeTitle: "string" }, supportingDiscovery: /about|abstract|summary|readme|description/i, validation: ["non-empty strings ≤ 1000 chars", "language tags parsed as BCP-47 primary subtag"] },
+  2: { extended: { chapters: "array", attachments: "array", pageOrder: "array", componentParts: "array", breadcrumbs: "array" }, supportingDiscovery: /contents|toc|index|chapters|parts/i, validation: ["counts are non-negative integers", "heading levels 1–6"] },
+  3: { extended: { accessionNumber: "string", recordNumber: "string", managingDepartment: "string", collectionOwner: "string" }, supportingDiscovery: /catalog(ue)?[- _]?record|accession|collection|holdings|about[- _]us|department/i, validation: ["identifiers are trimmed strings", "status values preserved verbatim"] },
+  4: { extended: { frameRate: "number", bitDepth: "number", colorDepth: "number", compression: "string", protocolVersion: "string" }, supportingDiscovery: null, validation: ["dimensions/sizes are positive numbers", "MIME declared vs sniffed compared (mismatch → quality note)"] },
+  5: { extended: { migrationHistory: "array", preservationActions: "array", formatDependencies: "array", fixityAlgorithm: "string" }, supportingDiscovery: /preservation|digital[- _]archiv|bagit|manifest|fixity|migration|premis/i, validation: ["checksums are hex of the right length", "capture timestamps normalised to UTC"] },
+  6: { extended: { licenseScope: "string", attributionRequirement: "string", reuseConditions: "string" }, supportingDiscovery: /licen[cs]e|terms|copyright|rights|reuse|permissions|creativecommons/i, validation: ["licence URLs resolved to labels where known (CC, OSI, GNU)", "scope recorded: resource / collection / organization / site"] },
+  7: { extended: { accessConditions: "string", embargo: "date", permissionsRequired: "array" }, supportingDiscovery: /access|restricted|embargo|request[- _]access|data[- _]use[- _]agreement/i, validation: ["never derived from bypass attempts — only observed responses and declarations"] },
+  8: { extended: { custodyHistory: "array", collectionOrigin: "string", sourceReferences: "array" }, supportingDiscovery: /about|publisher|provenance|source|origin|who[- _]we[- _]are|history/i, validation: ["publisher values are source claims unless corroborated"] },
+  9: { extended: { processingDescription: "string", upstreamDatasets: "array", derivationStatements: "array" }, supportingDiscovery: /lineage|processing|derived|source[- _]data|methodolog|pipeline/i, validation: ["derivations need an explicit statement or link — never inferred from similarity"] },
+  10: { extended: { publishedChangeLog: "array", sourceAuditRecords: "array" }, supportingDiscovery: /changelog|history|audit|activity|commits|log\b/i, validation: ["crawler events are labelled as this system's own records", "no claim of access to private logs"] },
+  11: { extended: { supersedes: "string", supersededBy: "string", revisionNotice: "string", snapshotDiff: "object" }, supportingDiscovery: /changelog|release|version|revision|errat|history|what'?s[- _]new/i, validation: ["snapshot differences computed only between this system's own snapshots"] },
+  12: { extended: { captureDate: "date", observationPeriod: "string", expirationDate: "date", timezoneOriginal: "string" }, supportingDiscovery: null, validation: ["UTC normalised with original kept", "distinct meanings kept separate (published ≠ modified ≠ captured ≠ coverage)"] },
+  13: { extended: { coordinateSystem: "string", boundingBox: "object", namedPlaces: "array", inferredLocation: "string" }, supportingDiscovery: /coverage|map|geograph|spatial|region|location|geojson|kml|wms/i, validation: ["lat ∈ [-90,90], lon ∈ [-180,180]", "photo GPS rounded ~1 km", "inferred locations labelled inferred"] },
+  14: { extended: { accessionId: "string", localIdentifier: "array", persistentIdentifier: "array" }, supportingDiscovery: /doi\.org|orcid\.org|handle\.net|ark:|identifiers?\.org|wikidata/i, validation: ["ISBN/ISSN/ORCID checksums", "DOI syntax", "aliases never merged without identifier equality"] },
+  15: { extended: { attachments: "array", ownershipStatements: "array", organizationalConnections: "array" }, supportingDiscovery: /related|see[- _]also|cites|references|part[- _]of/i, validation: ["every relationship carries evidence and method"] },
+  16: { extended: { glossary: "array", units: "array", controlledVocabularies: "array" }, supportingDiscovery: /glossary|definitions|codebook|vocabular|ontology|thesaurus|data[- _]dictionary|units/i, validation: ["terms preserved verbatim with their declaring source"] },
+  17: { extended: { nesting: "number", tableStructures: "array", schemaDocumentation: "url" }, supportingDiscovery: /schema|\.xsd|datapackage\.json|data[- _]dictionary|openapi|swagger|field[- _]definitions/i, validation: ["declared types vs inferred types labelled separately"] },
+  18: { extended: { uniqueness: "array", formatRequirements: "array", documentedRules: "array", inferredPatterns: "array" }, supportingDiscovery: /schema|validation|constraints|rules|specification/i, validation: ["documented rules (source) separated from inferred patterns (system)"] },
+  19: { extended: { population: "string", weighting: "string", collectionMethod: "string", statisticalUnit: "string", aggregationLevel: "string" }, supportingDiscovery: /methodolog|methods|sampling|survey[- _]design|technical[- _]notes?|weight|population|codebook/i, validation: ["sample sizes are positive integers", "computed statistics labelled inferred"] },
+  20: { extended: { duplicateRate: "number", consistencyIssues: "array", publishedQualityLimitations: "string" }, supportingDiscovery: /quality|limitations|known[- _]issues|errat|caveats/i, validation: ["measurements (system) separated from publisher quality claims (source)"] },
+  21: { extended: { businessDefinitions: "array", processDescriptions: "array", ownershipStatements: "array" }, supportingDiscovery: /about|organi[sz]ation|governance|ownership|business[- _]glossary/i, validation: ["organisation data only — never private individuals' addresses or phones"] },
+  22: { extended: { refreshSchedule: "string", serviceStatus: "string", crawlerState: "object" }, supportingDiscovery: /status|update[- _]schedule|frequency|refresh/i, validation: ["publisher schedules separated from the crawler's own state"] },
+  23: { extended: { metricDefinition: "string", observedAt: "date" }, supportingDiscovery: /stats|statistics|metrics|downloads|usage/i, validation: ["counts are non-negative", "each carries its observation timestamp"] },
+  24: { extended: { annotations: "array", labels: "array", commentAttribution: "array" }, supportingDiscovery: /comments|annotations|reviews|tags/i, validation: ["public annotations only; individual commenters not profiled"] },
+  25: { extended: { catalogDescription: "string", discoveryTerms: "array", indexingReferences: "array" }, supportingDiscovery: /sitemap|feed|rss|atom|catalog|opensearch/i, validation: ["robots directives parsed per RFC 9309"] },
+  26: { extended: { structuredMarkup: "array", languageDeclarations: "array" }, supportingDiscovery: null, validation: ["canonical/alternate URLs absolute and http(s)"] },
+  27: { extended: { sharingDescription: "string", sharingResourceRefs: "array" }, supportingDiscovery: null, validation: ["preview image URLs absolute"] },
+  28: { extended: { sourceReportedModified: "date", localDownloadTime: "date", originalFilename: "string" }, supportingDiscovery: null, validation: ["source-reported properties separated from properties created by local download"] },
+  29: { extended: { captureTime: "date", creatorCredit: "string", exposureSettings: "object", ocrText: "string" }, supportingDiscovery: null, validation: ["serial numbers masked", "OCR text labelled system measurement"] },
+  30: { extended: { recordingInfo: "string", embeddedIdentifiers: "array" }, supportingDiscovery: null, validation: ["durations in seconds", "sample rates in Hz"] },
+  31: { extended: { frameRate: "number", streams: "array", chapters: "array", embeddedTags: "object" }, supportingDiscovery: /transcript|captions|subtitles|\.vtt|\.srt/i, validation: ["epoch-zero container dates rejected", "subtitle presence ≠ caption quality"] },
+  32: { extended: { producingApplication: "string", revisionProperties: "object", attachments: "array", signatures: "object" }, supportingDiscovery: null, validation: ["malformed documents reported as extraction_failed, never as empty"] },
+  33: { extended: { routingHeaders: "array", attachmentProperties: "array" }, supportingDiscovery: null, validation: ["addresses masked", "only publicly published or user-provided messages"] },
+  34: { extended: { dnsRecords: "object", tlsCertificate: "object", httpBehaviour: "object" }, supportingDiscovery: null, validation: ["only this system's own connection metadata and public DNS"] },
+  35: { extended: { calibration: "string", measurementSettings: "object", sensorIdentifier: "string" }, supportingDiscovery: /instrument|sensor|calibration|equipment|station[- _]metadata|device/i, validation: ["serial numbers masked"] },
+  36: { extended: { protocol: "string", instrumentSettings: "object", sampleDescription: "string", measurementConditions: "string" }, supportingDiscovery: /protocol|methods|methodolog|experiment|instrument|supplementary|materials/i, validation: ["citations validated as DOIs where possible", "Crossref corroboration recorded as corroborated/contradicted"] },
+  37: { extended: { trainingData: "array", evaluationReport: "array", manifest: "object" }, supportingDiscovery: /model[- _]card|dataset[- _]card|readme|evaluation|benchmark|config\.json/i, validation: ["metrics keep their dataset + metric name"] },
+  38: { extended: { accessibilityStatement: "url", transcriptAvailable: "boolean", documentStructureTagged: "boolean" }, supportingDiscovery: /accessibility|transcript|captions|alt[- _]text|vpat/i, validation: ["feature presence never reported as compliance"] },
+  39: { extended: { publishedClassification: "string", systemDetectedIndicators: "object", consentRestrictions: "string" }, supportingDiscovery: /privacy|data[- _]protection|gdpr|personal[- _]data|consent/i, validation: ["published classifications separated from system-detected indicators", "PII never stored as values"] },
+  40: { extended: { sourceRetentionPolicy: "array", systemRetentionPolicy: "object", deletionPolicy: "string" }, supportingDiscovery: /retention|records[- _]schedule|disposal|deletion|privacy/i, validation: ["source policies separated from this system's own retention rules"] },
+  41: { extended: { publisherChecksums: "array", signatureStatus: "string", manifestVerification: "object" }, supportingDiscovery: /sha256|checksums?|\.sha\d+|md5|signature|\.asc|\.sig|manifest/i, validation: ["byte integrity ≠ factual truth", "signatures detected, not cryptographically verified unless stated"] },
+};
+
+for (const c of CATEGORIES) {
+  const ext = CATEGORY_EXTENSIONS[c.id];
+  if (!ext) throw new Error(`category ${c.id} lacks an extension entry`);
+  Object.assign(c.fields, ext.extended);
+}

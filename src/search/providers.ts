@@ -319,4 +319,51 @@ export const PROVIDERS: Provider[] = [
   },
 ];
 
+PROVIDERS.push(
+  {
+    id: "zenodo",
+    name: "Zenodo",
+    homepage: "https://zenodo.org",
+    types: ["dataset", "paper"],
+    requestUrl: (q, n) => `https://zenodo.org/api/records?q=${enc(q)}&size=${n}&sort=bestmatch`,
+    async search(q, n) {
+      const data = await safeFetchJson<{ hits?: { hits?: J[] } }>(this.requestUrl(q, n), { timeoutMs: T });
+      return (data.hits?.hits ?? []).map((r, i) => {
+        const md = (r.metadata ?? {}) as J;
+        const links = (r.links ?? {}) as J;
+        return {
+          title: clean(md.title) ?? String(r.id),
+          url: String(links.self_html ?? `https://zenodo.org/records/${r.id}`),
+          snippet: stripTags(md.description),
+          type: (((md.resource_type ?? {}) as J).type === "dataset" ? "dataset" : "paper") as "dataset" | "paper",
+          date: d(md.publication_date),
+          identifiers: { doi: typeof r.doi === "string" ? r.doi.toLowerCase() : undefined },
+          highlights: [{ category: 14, field: "doi", value: r.doi ?? null }, { category: 6, field: "license", value: ((md.license ?? {}) as J).id ?? null }],
+          rank: i,
+        };
+      });
+    },
+  },
+  {
+    id: "dataverse",
+    name: "Harvard Dataverse",
+    homepage: "https://dataverse.harvard.edu",
+    types: ["dataset"],
+    requestUrl: (q, n) => `https://dataverse.harvard.edu/api/search?q=${enc(q)}&type=dataset&per_page=${n}`,
+    async search(q, n) {
+      const data = await safeFetchJson<{ data?: { items?: J[] } }>(this.requestUrl(q, n), { timeoutMs: T });
+      return (data.data?.items ?? []).map((r, i) => ({
+        title: clean(r.name) ?? String(r.global_id),
+        url: String(r.url),
+        snippet: clean(r.description, 320),
+        type: "dataset" as const,
+        date: d(r.published_at),
+        identifiers: { doi: typeof r.global_id === "string" && r.global_id.startsWith("doi:") ? r.global_id.slice(4).toLowerCase() : undefined },
+        highlights: [{ category: 8, field: "publisher", value: r.publisher ?? null }, { category: 1, field: "subject", value: r.subjects ?? [] }],
+        rank: i,
+      }));
+    },
+  },
+);
+
 export const PROVIDER_BY_ID = new Map(PROVIDERS.map((p) => [p.id, p]));

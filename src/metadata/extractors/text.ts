@@ -2,6 +2,7 @@ import yaml from "js-yaml";
 import { C } from "../categories.js";
 import type { Extractor } from "../extractor.js";
 import { clean, findIdentifiers, maskEmail, normalizeDate, personalDataIndicators } from "../normalize.js";
+import { mineResearchText } from "./research-text.js";
 
 type Json = Record<string, unknown>;
 const arr = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))) : v ? [String(v)] : []);
@@ -104,6 +105,7 @@ export const textExtractor: Extractor = {
       ctx.add(C.integrity, "publishedChecksums", sums.slice(0, 50).map((s) => ({ sha256: s[1].toLowerCase(), file: s[2] })), { method: "sha256sum manifest" });
     }
 
+    mineResearchText(ctx, text.replace(/\s+/g, " "), "document text");
     const ids = findIdentifiers(text);
     ctx.add(C.identifiers, "doi", ids.doi, { method: "doi pattern" });
     ctx.add(C.identifiers, "isbn", ids.isbn, { method: "isbn pattern + checksum" });

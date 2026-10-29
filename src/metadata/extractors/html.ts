@@ -2,6 +2,7 @@ import { C } from "../categories.js";
 import type { ExtractionContext, Extractor } from "../extractor.js";
 import { isType, ldString, ldStrings, ldTypes, ldUrl, type LdNode } from "../jsonld.js";
 import { clean, findIdentifiers, normalizeDate, splitKeywords } from "../normalize.js";
+import { mineResearchText } from "./research-text.js";
 
 const CC_RE = /creativecommons\.org\/(licenses|publicdomain)\/([a-z-]+)\/(\d\.\d)?/i;
 const SPDX_HINT = /\b(MIT License|Apache License,? Version 2\.0|GNU General Public License|BSD \d-Clause|CC[- ]BY(?:[- ](?:SA|NC|ND))*[- ]\d\.\d|CC0)\b/i;
@@ -76,6 +77,11 @@ export const htmlExtractor: Extractor = {
       else if (name === "coverage" || name === "spatial") ctx.add(C.spatial, "spatialCoverage", content, { method });
       else if (name === "source") ctx.add(C.lineage, "sources", [content], { method });
       else if (name === "relation" || name === "ispartof") ctx.add(C.relational, `dc:${name}`, content, { method });
+      else if (name === "provenance") ctx.add(C.provenance, "custodyHistory", [content], { method });
+      else if (name === "accessrights") ctx.add(C.access_security, "accessConditions", content, { method });
+      else if (name === "accrualperiodicity") ctx.add(C.operational, "refreshSchedule", content, { method });
+      else if (name === "conformsto") ctx.add(C.schema, "conformsTo", content, { method });
+      else if (name === "temporal") ctx.add(C.temporal, "temporalCoverage", content, { method });
     });
 
     // ------------------------------------------------------------ JSON-LD
@@ -124,6 +130,18 @@ export const htmlExtractor: Extractor = {
           ctx.add(C.access_security, "isAccessibleForFree", String(node.isAccessibleForFree).toLowerCase() === "true", { method: m("isAccessibleForFree") });
         }
         ctx.add(C.version, "version", ldString(node.version), { method: m("version") });
+        ctx.add(C.descriptive, "alternativeTitle", clean(ldString(node.alternativeHeadline ?? node.alternateName), 300), { method: m("alternativeHeadline|alternateName") });
+        ctx.add(C.access_security, "accessConditions", clean(ldString(node.conditionsOfAccess), 400), { method: m("conditionsOfAccess") });
+        ctx.add(C.rights, "reuseConditions", clean(ldString(node.usageInfo), 400), { method: m("usageInfo") });
+        ctx.add(C.rights, "attributionRequirement", clean(ldString(node.creditText), 300), { method: m("creditText") });
+        ctx.add(C.rights, "acquireLicensePage", ldUrl(node.acquireLicensePage), { method: m("acquireLicensePage") });
+        ctx.add(C.business, "funder", ldStrings(node.funder ?? node.funding, 10), { method: m("funder|funding"), scope: "organization" });
+        ctx.add(C.provenance, "sdPublisher", ldString(node.sdPublisher), { method: m("sdPublisher"), evidence: "publisher of the structured data itself (may differ from the content publisher)" });
+        ctx.add(C.file_system, "contentSize", ldString(node.contentSize), { method: m("contentSize") });
+        ctx.add(C.technical, "encodingFormat", ldString(node.encodingFormat), { method: m("encodingFormat") });
+        ctx.add(C.accessibility, "transcriptAvailable", node.transcript ? true : null, { method: m("transcript"), evidence: "declared transcript; quality not assessed" });
+        dateField(ctx, C.temporal, "uploaded", node.uploadDate, m("uploadDate"));
+        ctx.add(C.video, "declaredDuration", ldString(node.duration), { method: m("duration"), evidence: "ISO 8601 duration declared by the page (not measured from the file)" });
         ctx.add(C.version, "softwareVersion", ldString(node.softwareVersion), { method: m("softwareVersion") });
         for (const id of ldStrings(node.identifier, 10)) ctx.add(C.identifiers, "identifier", [id], { method: m("identifier") });
         for (const s of ldStrings(node.sameAs, 20)) if (/^https?:/.test(s)) ctx.relate("same_as", s, "json-ld sameAs", m("sameAs"));
@@ -149,6 +167,17 @@ export const htmlExtractor: Extractor = {
         // Dataset-specific
         if (isType(node, "Dataset", "DataCatalog")) {
           ctx.add(C.spatial, "spatialCoverage", ldString(node.spatialCoverage), { method: m("spatialCoverage") });
+          const vm = (Array.isArray(node.variableMeasured) ? node.variableMeasured : node.variableMeasured ? [node.variableMeasured] : []) as unknown[];
+          const pv = vm.filter((v): v is LdNode => Boolean(v) && typeof v === "object");
+          ctx.add(C.semantic, "units", pv.filter((v) => v.unitText || v.unitCode).map((v) => ({ variable: ldString(v.name), unit: ldString(v.unitText ?? v.unitCode) })), { method: m("variableMeasured.unitText|unitCode") });
+          ctx.add(C.semantic, "fieldDescriptions", pv.filter((v) => v.description).map((v) => ({ field: ldString(v.name), description: clean(ldString(v.description), 200) })), { method: m("variableMeasured.description") });
+          const sc = node.spatialCoverage as LdNode | undefined;
+          const box = sc && typeof sc === "object" ? ldString((sc.geo as LdNode | undefined)?.box) : null;
+          if (box) {
+            const [s1, w1, n1, e1] = box.split(/[\s,]+/).map(Number);
+            if ([s1, w1, n1, e1].every(Number.isFinite)) ctx.add(C.spatial, "boundingBox", { south: s1, west: w1, north: n1, east: e1 }, { method: m("spatialCoverage.geo.box") });
+          }
+          ctx.add(C.technical, "distributionFormats", [...new Set(((Array.isArray(node.distribution) ? node.distribution : node.distribution ? [node.distribution] : []) as LdNode[]).map((dd) => ldString(dd.encodingFormat)).filter(Boolean))], { method: m("distribution.encodingFormat") });
           const variables = ldStrings(node.variableMeasured, 50);
           ctx.add(C.statistical, "variables", variables, { method: m("variableMeasured") });
           ctx.add(C.statistical, "measurementTechnique", ldString(node.measurementTechnique), { method: m("measurementTechnique") });
@@ -324,6 +353,13 @@ export const htmlExtractor: Extractor = {
     body.find("script, style, noscript, template, svg").remove();
     const plain = body.text().replace(/\s+/g, " ").trim();
     ctx.shared.set("plainText", plain);
+    // Research context (methods, samples, instruments…) only from main content, never nav/footer boilerplate.
+    const mainEl = $("main, article, [role=main]").first();
+    if (mainEl.length) {
+      const mc = mainEl.clone();
+      mc.find("script, style, nav, footer").remove();
+      mineResearchText(ctx, mc.text().replace(/\s+/g, " ").trim(), "page main content");
+    }
     const words = plain ? plain.split(" ").length : 0;
     ctx.add(C.structural, "wordCount", words, { status: "observed", method: "body text word count" });
 
@@ -444,6 +480,24 @@ export const htmlExtractor: Extractor = {
     const retention = [...plain.matchAll(RETENTION_RE)].map((m) => clean(m[0], 240)).filter(Boolean).slice(0, 8);
     const policyPage = /privacy|policy|retention|terms|gdpr|data-protection/i.test(new URL(ctx.response.finalUrl).pathname);
     ctx.add(C.retention, "retentionStatements", retention, { method: "retention phrase pattern", evidence: "quoted from page text", scope: policyPage ? "site" : "resource" });
+
+    // ------------------------------------------------------------ directory listings (Apache/nginx autoindex)
+    if (/^index of\s/i.test(title ?? "") || /^index of\s/i.test($("h1").first().text())) {
+      const rows: Array<{ name: string; modified: string | null; size: string | null }> = [];
+      $("pre a[href], table a[href]").each((_, el) => {
+        const name = $(el).attr("href") ?? "";
+        if (!name || name.startsWith("?") || name.startsWith("/") || name === "../") return;
+        const line = ($(el).closest("tr").text() || String(($(el)[0].next as { data?: string } | null)?.data ?? "")).replace(/\s+/g, " ").trim();
+        const date = line.match(/\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\d{2}-[A-Za-z]{3}-\d{4} \d{2}:\d{2}/)?.[0] ?? null;
+        const size = line.match(/\s(\d+(?:\.\d+)?[KMG]?)\s*$/)?.[1] ?? null;
+        rows.push({ name: decodeURIComponent(name), modified: date, size });
+      });
+      ctx.add(C.discovery, "directoryListing", true, { status: "observed", method: "autoindex page" });
+      ctx.add(C.structural, "entryCount", rows.length, { status: "observed", method: "autoindex rows" });
+      ctx.add(C.file_system, "listing", rows.slice(0, 200), { method: "autoindex rows", evidence: "source-reported names, sizes and modification times" });
+      const refs = (ctx.shared.get("references") as Array<{ url: string; tag: string }> | undefined) ?? [];
+      for (const r of refs) if (r.tag === "a") r.tag = "listing";
+    }
 
     // ------------------------------------------------------------ AI/ML page hints (model cards rendered as HTML)
     const hfModel = /huggingface\.co$/.test(host) && /^\/[^/]+\/[^/]+\/?$/.test(new URL(ctx.response.finalUrl).pathname);

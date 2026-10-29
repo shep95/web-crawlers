@@ -85,6 +85,8 @@ export function parseIntent(q: string): QueryIntent {
   const reasons: string[] = [];
   if (DATA_WORDS.test(query)) {
     weights.datagov = 2.2;
+    weights.zenodo = 2;
+    weights.dataverse = 2;
     weights.internet_archive = 1.3;
     weights.huggingface = 1.3;
     [3, 17, 19, 13].forEach((c) => categories.add(c));

@@ -9,3 +9,11 @@ seeds:
   - { id: nasa_feed, url: "https://www.nasa.gov/feed/", type: feed, interval_hours: 12, priority: 50 }
   - { id: w3c_feed, url: "https://www.w3.org/news/feed/", type: feed, interval_hours: 24, priority: 45 }
   - { id: schemaorg, url: "https://schema.org/docs/full.html", type: page, interval_hours: 168, priority: 40 }
+
+# Common Crawl index sampling for standalone files (no webpage required).
+commoncrawl:
+  domains: [noaa.gov, nasa.gov, usgs.gov, imd.gov.in, data.gov.in, europa.eu, ac.uk, edu.au, who.int, worldbank.org, un.org, gov.uk]
+  mimes: [application/pdf, text/csv, image/jpeg, video/mp4, application/json, application/zip, audio/mpeg]
+
+# Public storage listings (S3/GCS XML/JSON, autoindex pages) are followed automatically
+# whenever the crawler encounters them; operators may also seed known public listings here.

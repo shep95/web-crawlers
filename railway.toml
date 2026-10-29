@@ -1,11 +1,12 @@
+# Shared build/deploy settings for both services built from this repo:
+#   api      — SERVICE_ROLE=api, public domain, scale replicas freely (stateless)
+#   crawler  — SERVICE_ROLE=crawler, no public domain, scale replicas freely (coordinated via Postgres)
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/health"
-healthcheckTimeout = 60
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 5
-# One replica: the corpus is a single-writer SQLite database on the mounted volume (/data).
-numReplicas = 1
+restartPolicyMaxRetries = 10

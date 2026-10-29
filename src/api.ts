@@ -26,8 +26,10 @@ import { prioritizeSeedsForQuestion } from "./chat/retrieval-ranker.js";
 
 import { registerV2 } from "./http/v2.js";
 import { registerCorpusRoutes } from "./http/corpus-routes.js";
-import { CorpusStore } from "./corpus/store.js";
+import { openCorpus } from "./corpus/pg-store.js";
+import type { Corpus, CrawlerProfile } from "./corpus/types.js";
 import { AutonomousCrawler } from "./corpus/crawler.js";
+import { playwrightRenderer } from "./corpus/render.js";
 import { ApiKeys, LatencyStats } from "./http/guards.js";
 import { getEgressMode } from "./net/safe-fetch.js";
 import { analysisSlots } from "./metadata/pipeline.js";
@@ -46,9 +48,11 @@ const UI_CSP =
 const PUBLIC_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "public");
 
 export interface BuildOptions {
-  /** Corpus database path (default: $DATA_DIR/corpus.db, DATA_DIR defaults to ./data). ":memory:" for tests. */
+  /** SQLite path when DATABASE_URL is not set (default: $DATA_DIR/corpus.db). ":memory:" for tests. */
   corpusPath?: string;
-  /** Start the autonomous crawler in this process (default: CRAWLER_ENABLED !== "off"). */
+  /** Inject a corpus (tests). */
+  corpus?: Corpus;
+  /** Start crawlers in this process. Default: SERVICE_ROLE ≠ "api" and CRAWLER_ENABLED ≠ "off". */
   crawler?: boolean;
   /** Mount the legacy v1 crawler/chat/deep-web routes (SQLite + disk). Default: LEGACY_API=on. */
   legacy?: boolean;
@@ -67,7 +71,8 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
   app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: Number(process.env.MAX_UPLOAD_BYTES ?? 25 * 1024 * 1024) }, (_req, body, done) => done(null, body));
 
   const corsOrigins = (process.env.CORS_ORIGIN ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  await app.register(cors, { origin: corsOrigins.length ? corsOrigins : false, methods: ["GET", "POST", "OPTIONS"] });
+  // CORS_ORIGIN: "*" for any origin (public read API), or a comma-separated allow-list of frontend origins.
+  await app.register(cors, { origin: corsOrigins.includes("*") ? true : corsOrigins.length ? corsOrigins : false, methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["content-type", "authorization", "x-api-key", "x-filename", "x-content-type"], maxAge: 86400 });
 
   app.addHook("onSend", async (req, reply) => {
     for (const [k, v] of Object.entries(API_SECURITY_HEADERS)) reply.header(k, v);
@@ -90,18 +95,35 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
     return reply.code(ready ? 200 : 503).send({ ready, rssMb: Math.round(mem / 1048576), analysisSlots: slots, egress: getEgressMode() });
   });
 
-  await registerV2(app, { keys, stats, corsOrigin: corsOrigins[0] ?? null, startedAt });
+  await registerV2(app, { keys, stats, corsOrigin: corsOrigins.includes("*") ? "*" : corsOrigins[0] ?? null, startedAt });
 
-  const store = new CorpusStore(opts.corpusPath ?? join(process.env.DATA_DIR ?? "./data", "corpus.db"));
-  const crawlerOn = opts.crawler ?? process.env.CRAWLER_ENABLED !== "off";
-  const crawler = crawlerOn ? new AutonomousCrawler({ store }) : null;
-  registerCorpusRoutes(app, { store, crawler, keys });
-  app.addHook("onReady", async () => crawler?.start());
+  const store = opts.corpus ?? (await openCorpus({ sqlitePath: opts.corpusPath }));
+  const role = process.env.SERVICE_ROLE ?? "all"; // all | api | crawler
+  const crawlerOn = opts.crawler ?? (role !== "api" && process.env.CRAWLER_ENABLED !== "off");
+  // Several specialised crawlers can share one process; each profile can also run as its own scaled service.
+  const profiles = (process.env.CRAWLER_PROFILES ?? process.env.CRAWLER_PROFILE ?? "generalist,datasets,media,documents,refresh")
+    .split(",").map((p) => p.trim()).filter(Boolean) as CrawlerProfile[];
+  const renderer = process.env.RENDER_JS === "on" ? playwrightRenderer() : null;
+  const crawlers = crawlerOn ? profiles.map((profile) => new AutonomousCrawler({ store, profile, renderer })) : [];
+  registerCorpusRoutes(app, { store, crawlers, keys, topicalDiscovery: process.env.TOPICAL_DISCOVERY !== "off" });
+  app.addHook("onReady", async () => crawlers.forEach((c) => c.start()));
   app.addHook("onClose", async () => {
-    await crawler?.stop();
-    store.close();
+    await Promise.all(crawlers.map((c) => c.stop()));
+    await renderer?.close();
+    if (!opts.corpus) await store.close();
   });
-  const prune = setInterval(() => store.pruneEvents(), 6 * 3600_000);
+  // Operational heartbeat: one structured log line with corpus + crawler state (category 22 / monitoring).
+  if (crawlers.length) {
+    const beat = setInterval(() => {
+      void store
+        .stats()
+        .then((st) => app.log.info({ heartbeat: true, crawlers: crawlers.map((c) => ({ id: c.id, processed: c.processed })), frontier: st.byState.queued ?? 0, byState: st.byState, byKind: st.byKind, observations: st.observations, categoriesObserved: st.categoriesObserved, hosts: st.hosts }, "crawler_heartbeat"))
+        .catch(() => undefined);
+    }, Number(process.env.HEARTBEAT_MS ?? 300_000));
+    beat.unref();
+    app.addHook("onClose", async () => clearInterval(beat));
+  }
+  const prune = setInterval(() => void store.pruneEvents(Date.now()).catch(() => undefined), 6 * 3600_000);
   prune.unref();
   app.addHook("onClose", async () => clearInterval(prune));
 

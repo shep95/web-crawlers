@@ -5,6 +5,7 @@ import { officeExtractor, pdfExtractor } from "./documents.js";
 import { archiveExtractor, checksumVerifier, crossrefCorroboration, dnsExtractor, githubExtractor, huggingFaceExtractor, packageRegistryExtractor, tlsExtractor } from "./enrich.js";
 import { htmlExtractor } from "./html.js";
 import { isoBmffExtractor } from "./isobmff.js";
+import { ocrExtractor } from "./ocr.js";
 import { httpExtractor } from "./http.js";
 import { audioVideoExtractor, imageExtractor } from "./media.js";
 import { emailExtractor, privacyExtractor, textExtractor } from "./text.js";
@@ -19,6 +20,7 @@ export const EXTRACTORS: Extractor[] = [
   imageExtractor,
   audioVideoExtractor,
   isoBmffExtractor,
+  ocrExtractor,
   pdfExtractor,
   officeExtractor,
   jsonExtractor,
