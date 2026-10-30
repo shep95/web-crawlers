@@ -104,7 +104,16 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
   ) STORED
 );
 CREATE INDEX IF NOT EXISTS idx_docs_tsv ON corpus_docs USING GIN (tsv);
+ALTER TABLE corpus_docs ADD COLUMN IF NOT EXISTS rank_tsv tsvector;
 `;
+
+// Ranking reads a compact vector (title, description, URL, first 1,500 characters) instead of the full-text one:
+// common words match thousands of pages, and reading every full vector made a cold "climate change" take ~10 s.
+// Matching still uses the full vector through its GIN index.
+const RANK_TSV = `setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+  setweight(to_tsvector('english', coalesce(left(description, 600), '')), 'B') ||
+  setweight(to_tsvector('simple', coalesce(url, '')), 'C') ||
+  setweight(to_tsvector('english', coalesce(left(body, 1500), '')), 'D')`;
 
 const n = (v: unknown) => (v === null || v === undefined ? (v as null) : Number(v));
 function toRow(r: Record<string, unknown>): ResourceRow {
@@ -148,7 +157,25 @@ export class PgCorpus implements Corpus {
         client.release();
       }
     }
+    if (opts.migrate !== false) void c.backfillRankVectors();
     return c;
+  }
+
+  /** Fills rank_tsv for pages indexed before it existed, 500 at a time, without blocking writers or other replicas. */
+  async backfillRankVectors(batch = 500): Promise<number> {
+    let total = 0;
+    try {
+      for (;;) {
+        const r = await this.q(`UPDATE corpus_docs SET rank_tsv = ${RANK_TSV} WHERE resource_id IN (SELECT resource_id FROM corpus_docs WHERE rank_tsv IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED)`, [batch]);
+        total += r.rowCount ?? 0;
+        if (!r.rowCount) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (total) await this.event(null, "rank_vectors_backfilled", `${total} documents`);
+    } catch (err) {
+      await this.event(null, "rank_vectors_backfill_failed", (err as Error).message.slice(0, 200)).catch(() => undefined);
+    }
+    return total;
   }
 
   private q<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<pg.QueryResult<T & pg.QueryResultRow>> {
@@ -334,6 +361,7 @@ export class PgCorpus implements Corpus {
            ON CONFLICT (resource_id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, meta = EXCLUDED.meta, body = EXCLUDED.body, url = EXCLUDED.url`,
           [resourceId, record.title ?? "", record.description ?? "", metaText(record), opts.text.slice(0, TEXT_EXCERPT).replace(/\u0000/g, ""), record.finalUrl],
         );
+        await client.query(`UPDATE corpus_docs SET rank_tsv = ${RANK_TSV} WHERE resource_id = $1`, [resourceId]);
       } else await client.query(`DELETE FROM corpus_docs WHERE resource_id = $1`, [resourceId]);
       await client.query("COMMIT");
       return sid;
@@ -502,7 +530,7 @@ export class PgCorpus implements Corpus {
       const n = extra.length + 1;
       const res = await this.q(
         `WITH hits AS (
-           SELECT d.resource_id, ts_rank(d.tsv, query, 1) AS rank, query
+           SELECT d.resource_id, ts_rank(COALESCE(d.rank_tsv, d.tsv), query, 1) AS rank, query
            FROM corpus_docs d JOIN resources r ON r.id = d.resource_id, to_tsquery('english', $1) query
            WHERE d.tsv @@ query AND ${where} ORDER BY rank DESC LIMIT $${n + 1} OFFSET $${n + 2})
          SELECT r.*, hits.rank,

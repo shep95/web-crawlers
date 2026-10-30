@@ -88,3 +88,28 @@ describe("content-text-v1 migration", () => {
     await third.close();
   });
 });
+
+import pg from "pg";
+import { PgCorpus } from "../src/corpus/pg-store.js";
+describe.runIf(process.env.TEST_DATABASE_URL)("compact rank vectors [postgres]", () => {
+  it("backfills rank_tsv for documents indexed before it existed", async () => {
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    const name = "rankvec_" + Date.now();
+    await admin.query(`CREATE DATABASE ${name}`);
+    const url = process.env.TEST_DATABASE_URL!.replace(/\/[^/]*$/, "/" + name);
+    try {
+      const c = await PgCorpus.connect(url, { max: 2 });
+      const direct = new pg.Pool({ connectionString: url });
+      await direct.query(`INSERT INTO resources (url, url_hash, host, state, kind, via, purpose, discovered_at) VALUES ('https://a.example/', 'h', 'a.example', 'indexed', 'webpage', 't', 'discovery', 'now')`);
+      await direct.query(`INSERT INTO corpus_docs (resource_id, title, body, url) SELECT id, 'Climate change report', 'long body', url FROM resources`);
+      expect((await direct.query(`SELECT count(*) n FROM corpus_docs WHERE rank_tsv IS NULL`)).rows[0].n).toBe("1");
+      expect(await c.backfillRankVectors()).toBe(1);
+      expect((await direct.query(`SELECT rank_tsv::text t FROM corpus_docs`)).rows[0].t).toMatch(/'climat':1A/);
+      await direct.end();
+      await c.close();
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.end();
+    }
+  });
+});
