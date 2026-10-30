@@ -309,3 +309,10 @@ describe("binary formats (real files)", () => {
     expect(r.categories).toHaveLength(41);
   });
 });
+
+describe("page text", () => {
+  it("keeps block boundaries so adjacent headings, paragraphs and list items never fuse into one word", async () => {
+    const r = await run("<!doctype html><html lang=en><head><title>t</title></head><body><h1>Dorset dialect</h1><p>History of it</p><ul><li>one</li><li>two</li></ul></body></html>", { "content-type": "text/html" });
+    expect(val(r, 2, "wordCount")).toBe(7);
+  });
+});

@@ -31,6 +31,13 @@ function licenseLabel(url: string): string | null {
   return null;
 }
 
+const BLOCKS = "address,article,aside,blockquote,br,caption,dd,div,dl,dt,figcaption,footer,form,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,td,th,tr,ul";
+/** Visible text with block boundaries kept as spaces (cheerio's .text() would fuse "Title</h1><p>Body" into "TitleBody"). */
+function blockText(root: { find(sel: string): { append(content: string): unknown }; text(): string }): string {
+  root.find(BLOCKS).append(" ");
+  return root.text().replace(/\s+/g, " ").trim();
+}
+
 export const htmlExtractor: Extractor = {
   id: "html",
   version: "1.0.0",
@@ -351,14 +358,14 @@ export const htmlExtractor: Extractor = {
 
     const body = $("body").clone();
     body.find("script, style, noscript, template, svg").remove();
-    const plain = body.text().replace(/\s+/g, " ").trim();
+    const plain = blockText(body);
     ctx.shared.set("plainText", plain);
     // Research context (methods, samples, instruments…) only from main content, never nav/footer boilerplate.
     const mainEl = $("main, article, [role=main]").first();
     if (mainEl.length) {
       const mc = mainEl.clone();
       mc.find("script, style, nav, footer").remove();
-      mineResearchText(ctx, mc.text().replace(/\s+/g, " ").trim(), "page main content");
+      mineResearchText(ctx, blockText(mc), "page main content");
     }
     const words = plain ? plain.split(" ").length : 0;
     ctx.add(C.structural, "wordCount", words, { status: "observed", method: "body text word count" });
