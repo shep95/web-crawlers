@@ -128,6 +128,13 @@ function stemPrefix(t: string): string {
   return t.length > 5 ? t.slice(0, Math.max(4, t.length - 3)) : t;
 }
 
+// Where the query appears: every term in the title ("title"), or only in the description/body ("text").
+export function titleMatch(title: string | null | undefined, terms: string[]): { matchedIn: "title" | "text"; titleTerms: number } {
+  const t = (title ?? "").toLowerCase();
+  const titleTerms = terms.filter((x) => t.includes(stemPrefix(x))).length;
+  return { matchedIn: terms.length && titleTerms === terms.length ? "title" : "text", titleTerms };
+}
+
 // Crawl plumbing (sitemaps, robots, feeds of links) and untitled files are rarely what a person searched for.
 const PLUMBING = /\/(?:[^/]*sitemap[^/]*\.xml(?:\.gz)?|robots\.txt|feed\/?|rss(?:\.xml)?|atom\.xml)(?:$|\?)/i;
 export function plumbingPenalty(r: Pick<SearchCandidate, "url" | "title">): number {
@@ -142,7 +149,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
   const wantTypes = RESOURCE_TYPE_TERMS.filter(([re]) => re.test(q));
   const limit = Math.min(opts.limit ?? 10, 50);
   const base = { query: q, terms, intentCategories: intentCats.map((c) => ({ id: c, name: CATEGORY_BY_ID.get(c)!.name })), resourceTypes: wantTypes.map(([, , n]) => n) };
-  if (!terms.length) return { ...base, total: 0, results: [], tookMs: 0 };
+  if (!terms.length) return { ...base, total: 0, matchQuality: "none" as const, results: [], tookMs: 0 };
 
   // Over-fetch, then re-rank with type intent and term coverage.
   // Words that say what *kind* of resource is wanted are handled by the type boost, not required as text.
@@ -197,6 +204,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
       kind: r.kind,
       host: r.host,
       score: Number(score.toFixed(4)),
+      ...titleMatch(r.title, searchTerms),
       snippet: r.snippet,
       retrievedAt: r.retrieved_at,
       indexedAt: r.indexed_at,
@@ -212,7 +220,11 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
       referencedBy: links.to.get(r.id) ?? [],
     });
   }
-  return { ...base, total, totalIsLowerBound: Boolean(found.totalIsLowerBound), results, tookMs: Date.now() - started };
+  // How well the index covers this request: a page "about" the query names every term in its title.
+  const strong = results.filter((x) => x.matchedIn === "title").length;
+  const someTitle = results.filter((x) => x.titleTerms > 0).length;
+  const matchQuality: "strong" | "partial" | "weak" | "none" = strong >= 3 ? "strong" : strong >= 1 || someTitle >= 3 ? "partial" : results.length ? "weak" : "none";
+  return { ...base, total, totalIsLowerBound: Boolean(found.totalIsLowerBound), matchQuality, results, tookMs: Date.now() - started };
 }
 
 /** Full evidence view of one collected resource. */

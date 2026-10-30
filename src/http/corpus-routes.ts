@@ -67,9 +67,11 @@ export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus
     const res = await pending;
     let discovery: { queued: boolean; reason: string } = { queued: false, reason: "local coverage sufficient" };
     const topic = r.data.q.toLowerCase().trim();
-    if (deps.topicalDiscovery && res.total < 5 && !recentTopics.get(topic)) {
+    // Thin coverage is either few matches, or many pages that only mention the words without being about them.
+    const thin = res.total < 5 || (!r.data.offset && (res.matchQuality === "weak" || res.matchQuality === "none"));
+    if (deps.topicalDiscovery && thin && !recentTopics.get(topic)) {
       recentTopics.set(topic, Date.now());
-      discovery = { queued: true, reason: "few collected resources match; topical discovery queued — candidates will be retrieved, inspected and indexed in the background" };
+      discovery = { queued: true, reason: res.total < 5 ? "few collected resources match; topical discovery queued — candidates will be retrieved, inspected and indexed in the background" : "collected resources mention these words but none is about them; topical discovery queued — candidates will be retrieved, inspected and indexed in the background" };
       void federatedSearch(r.data.q, { limit: 40, perProvider: 6, providers: PROVIDERS.map((p) => p.id).filter((id) => !EXCLUDED_PROVIDERS.has(id)) })
         .then(async (fs) => {
           const items = fs.results

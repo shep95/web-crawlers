@@ -52,3 +52,12 @@ describe("ranking", () => {
     expect(plumbingPenalty({ url: "https://example.org/sitemaps-guide", title: "How sitemaps work" })).toBe(1);
   });
 });
+
+import { titleMatch } from "../src/corpus/search.js";
+describe("match strength", () => {
+  it("says whether the title names the query or only the text mentions it", () => {
+    expect(titleMatch("Report - Climate Change Committee", ["climate", "change"])).toEqual({ matchedIn: "title", titleTerms: 2 });
+    expect(titleMatch("Web crawling explained", ["web", "crawler"])).toEqual({ matchedIn: "title", titleTerms: 2 });
+    expect(titleMatch("Privacy Policy | Proton", ["bitcoin", "price"])).toEqual({ matchedIn: "text", titleTerms: 0 });
+  });
+});
