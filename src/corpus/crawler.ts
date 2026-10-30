@@ -259,7 +259,7 @@ export class AutonomousCrawler extends EventEmitter {
       record.categories = coverage(record.fields, record.kind, record.processing.extractors, record.httpStatus);
       await store.setStage(row.id, { extracted_at: new Date(this.deps.now()).toISOString(), field_count: record.fields.length, extractor_errors: record.quality.extractorErrors.length });
 
-      const text = String(shared.get("plainText") ?? (["text", "csv", "json", "xml", "feed"].includes(record.kind) ? res.body.toString("utf8") : ""));
+      const text = String(shared.get("contentText") ?? shared.get("plainText") ?? (["text", "csv", "json", "xml", "feed"].includes(record.kind) ? res.body.toString("utf8") : ""));
       const ocr = shared.get("ocrText");
       const index = !unavailable && !dupOf;
       await store.saveSnapshot(row.id, record, { text: ocr ? `${text}\n${ocr}` : text, changedFields, index });
@@ -309,7 +309,7 @@ export class AutonomousCrawler extends EventEmitter {
       let shared = new Map<string, unknown>();
       const rec = await analyzeResponse(virtual, { sourceType: "url", enrich: false, filename: e.name, onShared: (s) => (shared = s) });
       const iso = new Date(this.deps.now()).toISOString();
-      await this.store.saveSnapshot(child.id, rec, { text: String(shared.get("plainText") ?? (["csv", "json", "text", "xml"].includes(rec.kind) ? e.body.toString("utf8") : "")), index: true });
+      await this.store.saveSnapshot(child.id, rec, { text: String(shared.get("contentText") ?? shared.get("plainText") ?? (["csv", "json", "text", "xml"].includes(rec.kind) ? e.body.toString("utf8") : "")), index: true });
       // setStage (not finish): finishing would release the host lease the parent still holds.
       await this.store.setStage(child.id, { state: "indexed", due_at: Number.MAX_SAFE_INTEGER, lease_until: null, retrieved_at: iso, inspected_at: iso, extracted_at: iso, indexed_at: iso, kind: rec.kind, title: rec.title ?? e.name, content_hash: rec.contentHash, field_count: rec.fields.length });
       await this.store.event(child.id, "indexed", `archive entry of #${parent.id} (${e.size} bytes)`);

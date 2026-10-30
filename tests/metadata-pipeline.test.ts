@@ -327,3 +327,15 @@ describe("site icon", () => {
     expect(val(r, 27, "siteIcon")).toBeUndefined();
   });
 });
+
+describe("search text", () => {
+  it("indexes the page's own content, not the site menu, banner and footer", async () => {
+    let shared = new Map<string, unknown>();
+    const para = "Seagrasses are a highly productive ecosystem that supports biodiversity and fisheries, protects coastlines, and buries carbon. Climate change is reshaping where they can grow.";
+    await analyzeResponse(F.response(`<!doctype html><html lang=en><head><title>t</title></head><body><header><nav><a href=/a>About</a> <a href=/c>Contact</a> <a href=/k>Careers</a></nav></header><main><h1>Seagrass futures</h1><p>${para}</p></main><footer>Copyright 2026 Example</footer></body></html>`, { "content-type": "text/html" }), { sourceType: "url", enrich: false, onShared: (s) => (shared = s) });
+    const text = String(shared.get("contentText"));
+    expect(text.startsWith("Seagrass futures")).toBe(true);
+    expect(text).not.toMatch(/About|Careers|Copyright/);
+    expect(String(shared.get("plainText"))).toMatch(/About/);
+  });
+});

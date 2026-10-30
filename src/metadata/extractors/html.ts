@@ -367,6 +367,11 @@ export const htmlExtractor: Extractor = {
     body.find("script, style, noscript, template, svg").remove();
     const plain = blockText(body);
     ctx.shared.set("plainText", plain);
+    // Search excerpts come from the page's own content, not the site menu, banner and footer repeated on every page.
+    const content = ($("main, article, [role=main]").first().length ? $("main, article, [role=main]").first() : $("body")).clone();
+    content.find("script, style, noscript, template, svg, nav, header, footer, aside, form, [role=navigation], [role=banner], [role=contentinfo], [role=search], [aria-hidden=true]").remove();
+    const contentText = blockText(content);
+    ctx.shared.set("contentText", contentText.split(" ").length >= 25 ? contentText : plain);
     // Research context (methods, samples, instruments…) only from main content, never nav/footer boilerplate.
     const mainEl = $("main, article, [role=main]").first();
     if (mainEl.length) {
