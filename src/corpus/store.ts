@@ -10,6 +10,8 @@ import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, t
 export * from "./types.js";
 
 /** SQLite (WAL) corpus for single-node deployments and tests. One writer process. */
+// One-time data migrations. "content-text-v1": search text now excludes menus/banners/footers, so web pages
+// indexed before it are scheduled for a re-crawl, spread over 24 hours so new crawling keeps going.
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -139,6 +141,10 @@ export class SqliteCorpus implements Corpus {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
     this.db.exec(SCHEMA);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS data_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`);
+    const now = Date.now();
+    if (this.db.prepare(`INSERT OR IGNORE INTO data_migrations (id, applied_at) VALUES ('content-text-v1', ?)`).run(now).changes)
+      this.db.prepare(`UPDATE resources SET due_at = ? + (id % 1440) * 60000 WHERE state = 'indexed' AND kind = 'webpage' AND duplicate_of IS NULL`).run(now);
   }
 
   async close(): Promise<void> {

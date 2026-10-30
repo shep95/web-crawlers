@@ -12,6 +12,8 @@ import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, t
  * with atomic row claims (hosts.leased_until, sources.last_run_at) so two
  * workers never fetch from the same host at once or run the same source.
  */
+// One-time data migrations. "content-text-v1": search text now excludes menus/banners/footers, so web pages
+// indexed before it are scheduled for a re-crawl, spread over 24 hours so new crawling keeps going.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS resources (
   id BIGSERIAL PRIMARY KEY,
@@ -138,6 +140,9 @@ export class PgCorpus implements Corpus {
       try {
         await client.query("SELECT pg_advisory_lock(424242)");
         await client.query(SCHEMA);
+        await client.query(`CREATE TABLE IF NOT EXISTS data_migrations (id TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)`);
+        const fresh = await client.query(`INSERT INTO data_migrations (id, applied_at) VALUES ('content-text-v1', $1) ON CONFLICT (id) DO NOTHING RETURNING id`, [Date.now()]);
+        if (fresh.rowCount) await client.query(`UPDATE resources SET due_at = $1 + (id % 1440) * 60000 WHERE state = 'indexed' AND kind = 'webpage' AND duplicate_of IS NULL`, [Date.now()]);
       } finally {
         await client.query("SELECT pg_advisory_unlock(424242)").catch(() => undefined);
         client.release();

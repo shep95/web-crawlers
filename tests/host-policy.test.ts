@@ -61,3 +61,30 @@ describe("match strength", () => {
     expect(titleMatch("Privacy Policy | Proton", ["bitcoin", "price"])).toEqual({ matchedIn: "text", titleTerms: 0 });
   });
 });
+
+import Database from "better-sqlite3";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SqliteCorpus } from "../src/corpus/store.js";
+describe("content-text-v1 migration", () => {
+  it("schedules already-indexed web pages for one re-crawl, once", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "mig-")), "c.db");
+    const first = new SqliteCorpus(path);
+    first.db.prepare(`DELETE FROM data_migrations`).run();
+    await first.close();
+    const raw = new Database(path);
+    const far = Date.now() + 30 * 864e5;
+    raw.prepare(`INSERT INTO resources (url, url_hash, host, state, kind, due_at, via, purpose, discovered_at) VALUES ('https://a.example/', 'h1', 'a.example', 'indexed', 'webpage', ?, 'test', 'discovery', 'now'), ('https://a.example/x.pdf', 'h2', 'a.example', 'indexed', 'pdf', ?, 'test', 'discovery', 'now')`).run(far, far);
+    raw.close();
+    const second = new SqliteCorpus(path);
+    const rows = second.db.prepare(`SELECT kind, due_at FROM resources ORDER BY id`).all() as { kind: string; due_at: number }[];
+    expect(rows[0].due_at).toBeLessThan(Date.now() + 864e5 + 1000);
+    expect(rows[1].due_at).toBe(far);
+    second.db.prepare(`UPDATE resources SET due_at = ?`).run(far);
+    await second.close();
+    const third = new SqliteCorpus(path);
+    expect((third.db.prepare(`SELECT due_at FROM resources WHERE kind = 'webpage'`).get() as { due_at: number }).due_at).toBe(far);
+    await third.close();
+  });
+});
