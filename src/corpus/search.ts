@@ -123,6 +123,18 @@ export function iconFor(fields: MetadataField[]): string | null {
  * question asks for, then attach a fact sheet, matching evidence, supporting
  * resources (and their facts), and the gaps for the categories asked about.
  */
+// "crawling" should credit a title that says "crawler": compare on a short common prefix.
+function stemPrefix(t: string): string {
+  return t.length > 5 ? t.slice(0, Math.max(4, t.length - 3)) : t;
+}
+
+// Crawl plumbing (sitemaps, robots, feeds of links) and untitled files are rarely what a person searched for.
+const PLUMBING = /\/(?:[^/]*sitemap[^/]*\.xml(?:\.gz)?|robots\.txt|feed\/?|rss(?:\.xml)?|atom\.xml)(?:$|\?)/i;
+export function plumbingPenalty(r: Pick<SearchCandidate, "url" | "title">): number {
+  if (PLUMBING.test(r.url)) return 0.15;
+  return r.title && r.title.trim() ? 1 : 0.6;
+}
+
 export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchOptions = {}) {
   const started = Date.now();
   const terms = questionTerms(q);
@@ -144,7 +156,10 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
     const hay = `${r.title ?? ""} ${r.description ?? ""} ${r.url} ${r.snippet ?? ""}`.toLowerCase();
     const coverageRatio = searchTerms.filter((t) => hay.includes(t)).length / searchTerms.length;
     const typeBoost = wantTypes.some(([, test]) => test(r)) ? 1.5 : 1;
-    return { r, score: r.rank * typeBoost * (0.6 + coverageRatio) };
+    // A page *about* the query names it in its title; body-only mentions rank below title matches.
+    const title = (r.title ?? "").toLowerCase();
+    const titleRatio = searchTerms.filter((t) => title.includes(stemPrefix(t))).length / searchTerms.length;
+    return { r, score: r.rank * typeBoost * (0.6 + coverageRatio) * (1 + 1.5 * titleRatio) * plumbingPenalty(r) };
   });
   scored.sort((a, b) => b.score - a.score);
 

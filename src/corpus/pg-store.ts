@@ -497,7 +497,7 @@ export class PgCorpus implements Corpus {
       const n = extra.length + 1;
       const res = await this.q(
         `WITH hits AS (
-           SELECT d.resource_id, ts_rank(d.tsv, query) AS rank, query
+           SELECT d.resource_id, ts_rank(d.tsv, query, 1) AS rank, query
            FROM corpus_docs d JOIN resources r ON r.id = d.resource_id, to_tsquery('english', $1) query
            WHERE d.tsv @@ query AND ${where} ORDER BY rank DESC LIMIT $${n + 1} OFFSET $${n + 2})
          SELECT r.*, hits.rank,

@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
+import { plumbingPenalty } from "../src/corpus/search.js";
 import { DEFAULT_EXCLUDED_HOSTS, excludedHosts, isExcludedHost, isExcludedUrl } from "../src/corpus/host-policy.js";
 import { backends } from "./helpers/backends.js";
 import type { Corpus } from "../src/corpus/types.js";
@@ -42,3 +43,12 @@ for (const makeBackend of backends()) {
     });
   });
 }
+
+describe("ranking", () => {
+  it("ranks crawl plumbing and untitled files below titled pages", () => {
+    expect(plumbingPenalty({ url: "https://techcrunch.com/sitemap-page-201.xml", title: null })).toBe(0.15);
+    expect(plumbingPenalty({ url: "https://example.org/robots.txt", title: "robots" })).toBe(0.15);
+    expect(plumbingPenalty({ url: "https://example.org/files/25-0507.pdf", title: null })).toBe(0.6);
+    expect(plumbingPenalty({ url: "https://example.org/sitemaps-guide", title: "How sitemaps work" })).toBe(1);
+  });
+});
