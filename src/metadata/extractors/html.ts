@@ -278,6 +278,13 @@ export const htmlExtractor: Extractor = {
     const previewImage = abs(base, og.image ?? tw.image);
     ctx.add(C.social_sharing, "previewImage", previewImage, { method: og.image ? "og:image" : "twitter:image" });
     if (og.title) ctx.add(C.descriptive, "title", og.title, { method: "html.meta[og:title]" });
+    // The site's own icon, largest declared first; /favicon.ico is the conventional fallback location.
+    const icons = $('link[rel~="icon"], link[rel="shortcut icon"], link[rel~="apple-touch-icon"]')
+      .map((_, el) => ({ href: abs(base, $(el).attr("href")), size: Number(String($(el).attr("sizes") ?? "").split(/[x\s]/)[0]) || (($(el).attr("rel") ?? "").includes("apple") ? 180 : 0) }))
+      .get()
+      .filter((i: { href: string | null }) => i.href && /^https?:/.test(i.href))
+      .sort((a: { size: number }, b: { size: number }) => b.size - a.size);
+    if (icons.length) ctx.add(C.social_sharing, "siteIcon", icons[0].href, { method: "html.link[rel=icon]" });
     if (og.description) ctx.add(C.descriptive, "description", og.description, { method: "html.meta[og:description]" });
     if (og.site_name) ctx.add(C.provenance, "siteName", og.site_name, { method: "html.meta[og:site_name]" });
     dateField(ctx, C.temporal, "published", meta('meta[property="article:published_time"]'), "html.meta[article:published_time]");

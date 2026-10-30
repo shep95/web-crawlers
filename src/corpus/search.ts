@@ -111,6 +111,12 @@ export function thumbnailFor(r: Pick<SearchCandidate, "kind" | "url" | "final_ur
   return null;
 }
 
+/** The site icon a page declares (link rel=icon), if any. */
+export function iconFor(fields: MetadataField[]): string | null {
+  const f = fields.find((x) => x.field === "siteIcon" && typeof x.value === "string");
+  return f && /^https?:\/\//.test(String(f.value)) ? String(f.value) : null;
+}
+
 /**
  * Answer an ordinary question from the collected corpus: rank resources by
  * full-text relevance over contents + metadata, boost resource types the
@@ -183,6 +189,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
       changes: r.change_count,
       categoriesObserved: [...observed].sort((a, b) => a - b),
       thumbnail: thumbnailFor(r, all),
+      icon: iconFor(all),
       facts: factSheet(all, supporting),
       evidence: evidenceFields.map((f) => ({ category: f.category, categoryName: CATEGORY_BY_ID.get(f.category)!.name, field: f.field, value: f.value, original: f.original, status: f.status, evidenceType: f.evidenceType, scope: f.scope, method: f.method, extractor: f.extractor, evidence: f.evidence, observedAt: f.observedAt })),
       gaps,

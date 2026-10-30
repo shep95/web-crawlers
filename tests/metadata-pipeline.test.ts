@@ -316,3 +316,14 @@ describe("page text", () => {
     expect(val(r, 2, "wordCount")).toBe(7);
   });
 });
+
+describe("site icon", () => {
+  it("records the largest declared icon as an absolute URL", async () => {
+    const r = await run('<!doctype html><html lang=en><head><title>t</title><link rel="icon" href="/fav-16.png" sizes="16x16"><link rel="icon" href="/fav-64.png" sizes="64x64"><link rel="apple-touch-icon" href="/touch.png"></head><body><p>x</p></body></html>', { "content-type": "text/html" }, "https://site.example/a/b");
+    expect(val(r, 27, "siteIcon")).toBe("https://site.example/touch.png");
+  });
+  it("records nothing when a page declares no icon", async () => {
+    const r = await run("<!doctype html><html lang=en><head><title>t</title></head><body><p>x</p></body></html>", { "content-type": "text/html" });
+    expect(val(r, 27, "siteIcon")).toBeUndefined();
+  });
+});
