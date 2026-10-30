@@ -48,6 +48,7 @@ export interface CorpusSearchOptions {
   kind?: string;
   category?: number;
   host?: string;
+  hosts?: string[];
 }
 
 export function questionTerms(q: string): string[] {
@@ -93,6 +94,8 @@ function factSheet(fields: MetadataField[], supporting: Array<{ link: LinkedReso
     version: [...pick([[11, "version"], [11, "latestRelease"], [11, "revision"], [11, "changedSinceLastSnapshot"]], 3), ...fromSupport(/revision|gap_version/, [[10, "changeEntries"], [12, "modified"]])],
     identifiers: pick([[14, "doi"], [14, "identifier"], [14, "canonicalUrl"], [14, "isbn"], [14, "arxiv"]], 4),
     access: pick([[7, "accessRequiresAuth"], [7, "isAccessibleForFree"], [7, "gated"]], 2),
+    languages: pick([[1, "language"]], 3),
+    funders: pick([[21, "funder"], [21, "fundingStatement"]], 6),
   };
 }
 
@@ -156,7 +159,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
   const TYPE_WORDS = /^(research|dataset|datasets|data|report|reports|paper|papers|document|documents|image|images|photo|photos|video|videos|audio|recordings?|files?|records?|about|information|resources?)$/i;
   const contentTerms = terms.filter((t) => !TYPE_WORDS.test(t));
   const searchTerms = contentTerms.length ? contentTerms : terms;
-  const found = await store.searchResources({ terms: searchTerms, kind: opts.kind, host: opts.host, category: opts.category, limit: Math.min(limit * 3, 100), offset: opts.offset ?? 0 });
+  const found = await store.searchResources({ terms: searchTerms, kind: opts.kind, host: opts.host, hosts: opts.hosts, category: opts.category, limit: Math.min(limit * 3, 100), offset: opts.offset ?? 0 });
   const { total } = found;
   const rows = found.rows.filter((r) => !isExcludedHost(r.host));
   const scored = rows.map((r) => {

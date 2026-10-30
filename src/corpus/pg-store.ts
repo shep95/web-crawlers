@@ -515,7 +515,7 @@ export class PgCorpus implements Corpus {
     return { from, to };
   }
 
-  async searchResources(q: { terms: string[]; kind?: string; host?: string; category?: number; limit: number; offset: number }) {
+  async searchResources(q: { terms: string[]; kind?: string; host?: string; hosts?: string[]; category?: number; limit: number; offset: number }) {
     const andQ = pgTsQuery(q.terms).replace(/ \| /g, " & ");
     const orQ = pgTsQuery(q.terms);
     if (!orQ) return { rows: [], total: 0 };
@@ -524,6 +524,8 @@ export class PgCorpus implements Corpus {
     const kinds = q.kind ? q.kind.split(",").filter(Boolean) : [];
     if (kinds.length) (extra.push(kinds), filters.push(`r.kind = ANY($${extra.length + 1}::text[])`));
     if (q.host) (extra.push(q.host, `%.${q.host}`), filters.push(`(r.host = $${extra.length} OR r.host LIKE $${extra.length + 1})`));
+    // Any of several publisher domains (e.g. gov.in or nic.in), matching the domain itself or any subdomain.
+    if (q.hosts?.length) (extra.push(q.hosts, q.hosts.map((h) => `%.${h}`)), filters.push(`(r.host = ANY($${extra.length}::text[]) OR r.host LIKE ANY($${extra.length + 1}::text[]))`));
     if (q.category) (extra.push(q.category), filters.push(`EXISTS (SELECT 1 FROM observations o WHERE o.resource_id = r.id AND o.category = $${extra.length + 1})`));
     const where = filters.join(" AND ");
     const run = async (tsq: string, limit: number, offset: number) => {

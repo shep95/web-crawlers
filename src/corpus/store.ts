@@ -426,12 +426,13 @@ export class SqliteCorpus implements Corpus {
     return { from, to };
   }
 
-  async searchResources(q: { terms: string[]; kind?: string; host?: string; category?: number; limit: number; offset: number }) {
+  async searchResources(q: { terms: string[]; kind?: string; host?: string; hosts?: string[]; category?: number; limit: number; offset: number }) {
     const filters = ["r.duplicate_of IS NULL", "r.state = 'indexed'"];
     const extra: unknown[] = [];
     const kinds = q.kind ? q.kind.split(",").filter(Boolean) : [];
     if (kinds.length) (filters.push(`r.kind IN (${kinds.map(() => "?").join(",")})`), extra.push(...kinds));
     if (q.host) (filters.push("(r.host = ? OR r.host LIKE ?)"), extra.push(q.host, `%.${q.host}`));
+    if (q.hosts?.length) (filters.push(`(${q.hosts.map(() => "r.host = ? OR r.host LIKE ?").join(" OR ")})`), extra.push(...q.hosts.flatMap((h) => [h, `%.${h}`])));
     if (q.category) (filters.push("EXISTS (SELECT 1 FROM observations o WHERE o.resource_id = r.id AND o.category = ?)"), extra.push(q.category));
     const where = filters.join(" AND ");
     const run = (match: string, limit: number, offset: number) =>

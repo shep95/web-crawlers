@@ -166,7 +166,7 @@ export interface Corpus {
 
   // search primitives
   /** Ranks resources matching ALL terms first; fills with ANY-term matches. `total` counts all-term matches (capped). */
-  searchResources(q: { terms: string[]; kind?: string; host?: string; category?: number; limit: number; offset: number }): Promise<{ rows: SearchCandidate[]; total: number; totalIsLowerBound?: boolean }>;
+  searchResources(q: { terms: string[]; kind?: string; host?: string; hosts?: string[]; category?: number; limit: number; offset: number }): Promise<{ rows: SearchCandidate[]; total: number; totalIsLowerBound?: boolean }>;
   matchObservations(snapshotId: number, terms: string[], categories: number[], limit: number): Promise<MetadataField[]>;
   categoryCounts(snapshotId: number): Promise<Array<{ category: number; n: number }>>;
   linkedFrom(resourceId: number): Promise<LinkedResource[]>;

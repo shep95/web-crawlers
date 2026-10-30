@@ -11,6 +11,8 @@ import { EXCLUDED_PROVIDERS } from "../corpus/host-policy.js";
 import { canonicalizeUrl } from "../crawl/site-crawler.js";
 import { EXTRACTORS } from "../metadata/extractors/index.js";
 import { CATEGORIES } from "../metadata/categories.js";
+import { understandQuery, type QueryPlan } from "../query/understand.js";
+import { askCorpus } from "../query/execute.js";
 import { LruCache } from "../util/async.js";
 import { ApiKeys } from "./guards.js";
 
@@ -23,6 +25,10 @@ const SearchQ = z.object({
   host: z.string().max(253).optional(),
 });
 
+const AskQ = SearchQ.extend({
+  // Up to three earlier questions from the same session, oldest first, so "only 2020 to 2025" refines the last search.
+  context: z.string().max(1500).optional(),
+});
 const recentTopics = new LruCache<number>(5000, 30 * 60_000);
 /** Short-lived answer cache: identical questions within the TTL cost one DB round-trip per replica. */
 const answerCache = new LruCache<unknown>(Number(process.env.SEARCH_CACHE_SIZE ?? 2000), Number(process.env.SEARCH_CACHE_TTL_MS ?? 30_000));
@@ -85,6 +91,53 @@ export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus
     }
     const stats = await cachedStats(store);
     const body = { ...res, discovery, corpus: { backend: store.backend, indexed: stats.byState.indexed ?? 0, crawlersInThisProcess: crawlers.map((c) => ({ id: c.id, profile: c.profile, running: c.isRunning })) } };
+    answerCache.set(key, JSON.stringify(body));
+    return { ...body, cache: { hit: false } };
+  });
+
+  /** The structured reading of a question: what it asks for, what was stated vs inferred, what is uncertain. */
+  const planFor = (q: string, context?: string): QueryPlan => {
+    let previous: QueryPlan | null = null;
+    for (const earlier of (context ?? "").split("\n").map((x) => x.trim()).filter(Boolean).slice(-3)) previous = understandQuery(earlier, { previous });
+    return understandQuery(q, { previous });
+  };
+  app.get("/api/v2/understand", async (req, reply) => {
+    const r = AskQ.safeParse(req.query);
+    if (!r.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
+    reply.header("cache-control", "public, max-age=300");
+    return { plan: planFor(r.data.q, r.data.context) };
+  });
+
+  /**
+   * Ask a whole question: understand it, search the index with that plan, check every result against each
+   * requirement, revise when too few qualify, and send the crawlers looking (with plan-built queries) when the
+   * index can't satisfy it yet.
+   */
+  app.get("/api/v2/ask", async (req, reply) => {
+    const r = AskQ.safeParse(req.query);
+    if (!r.success) return reply.code(400).send({ error: "INVALID_REQUEST", issues: r.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })) });
+    const key = "ask:" + JSON.stringify(r.data).toLowerCase();
+    const cached = answerCache.get(key);
+    reply.header("cache-control", "public, max-age=15, stale-while-revalidate=60");
+    if (cached) return reply.type("application/json; charset=utf-8").send(`${(cached.value as string).slice(0, -1)},"cache":{"hit":true,"ageSeconds":${Math.round(cached.ageMs / 1000)}}}`);
+    const plan = planFor(r.data.q, r.data.context);
+    const res = await askCorpus(store, plan, { limit: r.data.limit, offset: r.data.offset, kind: r.data.kind, host: r.data.host });
+    let discovery: { queued: boolean; reason: string; queries?: string[] } = { queued: false, reason: "local coverage sufficient" };
+    const topic = "ask:" + plan.discoveryQueries.join("|").toLowerCase();
+    if (deps.topicalDiscovery && !r.data.offset && !res.evaluation.satisfied && plan.discoveryQueries.length && !recentTopics.get(topic)) {
+      recentTopics.set(topic, Date.now());
+      discovery = { queued: true, reason: "few indexed sources meet every requirement; the crawlers are looking with queries built from the request", queries: plan.discoveryQueries };
+      void Promise.all(plan.discoveryQueries.map((dq) => federatedSearch(dq, { limit: 20, perProvider: 4, providers: PROVIDERS.map((p) => p.id).filter((id) => !EXCLUDED_PROVIDERS.has(id)) }).catch(() => ({ results: [] as Array<{ url: string; sources: Array<{ provider: string }> }> }))))
+        .then(async (lists) => {
+          const items = lists.flatMap((l) => l.results).map((x) => ({ x, url: canonicalizeUrl(x.url) })).filter((y): y is { x: (typeof y)["x"]; url: string } => Boolean(y.url))
+            // Candidates on the requested publisher's own sites go to the front of the queue.
+            .map(({ x, url }, i) => ({ url, priority: (plan.constraints.publisher?.hostSuffixes.some((h) => new URL(url).hostname.endsWith(h)) ? 95 : 80) - i * 0.3, depth: 0, via: `ask:${x.sources[0]?.provider ?? "unknown"}`, purpose: "discovery" as const }));
+          const n = await store.enqueue(items);
+          await store.event(null, "topical_discovery", `ask "${plan.original.slice(0, 80)}": ${items.length} candidates, ${n} new`);
+        })
+        .catch((err) => store.event(null, "topical_discovery_failed", (err as Error).message.slice(0, 200)));
+    }
+    const body = { ...res, discovery };
     answerCache.set(key, JSON.stringify(body));
     return { ...body, cache: { hit: false } };
   });
