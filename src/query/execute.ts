@@ -85,7 +85,11 @@ const COUNTRY_TLD: Record<string, string> = { IN: ".in", GB: ".uk", CA: ".ca", A
 
 function score(r: Result, checks: Check[]): number {
   let s = Math.log1p(Math.max(0, (r as { score?: number }).score ?? 0)) + 1;
-  for (const c of checks) s *= c.verdict === "pass" ? (c.strength === "hard" ? 1.6 : 1.25) : c.verdict === "unknown" ? (c.strength === "hard" ? 0.75 : 0.95) : 0.4;
+  for (const c of checks) {
+    // The topic is the core of the request: a page about it outranks one that only mentions it, whatever else passes.
+    if (c.requirement.startsWith("About ")) s *= c.verdict === "pass" ? 2 : 0.6;
+    else s *= c.verdict === "pass" ? (c.strength === "hard" ? 1.6 : 1.25) : c.verdict === "unknown" ? (c.strength === "hard" ? 0.75 : 0.95) : 0.4;
+  }
   return s;
 }
 
@@ -139,7 +143,9 @@ export async function askCorpus(store: Corpus, plan: QueryPlan, opts: AskOptions
     ranked.sort((a, b) => (c.order === "newest" ? year(b) - year(a) : year(a) - year(b)) || b.planScore - a.planScore);
   }
   const results = ranked.slice(0, limit);
-  const verified = results.filter((r) => r.checks.every((k) => k.strength !== "hard" || k.verdict === "pass")).length;
+  // Fully verified: every requirement confirmed, including that the result is about the topic (not only mentions it).
+  const confirmed = (r: CheckedResult) => r.checks.every((k) => (k.strength !== "hard" && !k.requirement.startsWith("About ")) || k.verdict === "pass");
+  const verified = results.filter(confirmed).length;
   const rejected = all.length - ranked.length;
   // Requested outputs beyond the documents themselves.
   const outputs: Record<string, unknown> = {};

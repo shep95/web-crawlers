@@ -130,3 +130,25 @@ describe("search planning and checking", () => {
     expect(res.outputs.funders).toMatchObject({ found: [{ funder: "Department of Science and Technology", relationship: "funds", documents: [{ resourceId: 1 }] }] });
   });
 });
+
+describe("live-run corrections", () => {
+  it("does not list country abbreviations as topic terms, and flags ambiguous acronyms", () => {
+    expect(u("find climate change reports published by the uk government").expansions.map((e) => e.term)).not.toContain("uk");
+    const who = u("find who reports about public health since 2021");
+    expect(who.constraints.publisher?.organization).toBe("World Health Organization");
+    expect(who.uncertain.join(" ")).toMatch(/Read "who" as World Health Organization/);
+    expect(u("who wrote the national ai strategy").constraints.publisher).toBeUndefined();
+  });
+
+  it("counts a result as verified only when it is about the topic, and ranks those first", async () => {
+    searchMock.mockReset();
+    const plan = u("find indian government documents about artificial intelligence");
+    searchMock.mockResolvedValue(rows([
+      base(1, "ipindia.gov.in", { title: "Annual Report 2022", matchedIn: "text" }),
+      base(2, "meity.gov.in", { title: "National Strategy for Artificial Intelligence", matchedIn: "title" }),
+    ]));
+    const res = await askCorpus({} as never, plan, { limit: 10 });
+    expect(res.results.map((r) => r.resourceId)).toEqual([2, 1]);
+    expect(res.evaluation).toMatchObject({ verified: 1, partlyVerified: 1 });
+  });
+});

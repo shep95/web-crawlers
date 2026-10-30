@@ -215,7 +215,7 @@ export function understandQuery(question: string, opts: { previous?: QueryPlan |
       // "us" is also a pronoun: only read it as a country next to a place-like word.
       if (abbr === "us" && !/\b(?:us|u\.s\.)\s+(?:government|gov|federal|agencies|policy|policies|documents|army|navy|congress)\b/.test(text)) continue;
       text = text.replace(re, full);
-      if (!["docs", "doc", "gov", "govt", "gov't", "dept", "org", "orgs", "univ", "uni", "intl", "natl", "info", "stats", "pubs"].includes(abbr)) expansions.push({ term: abbr, of: full, relation: "abbreviation", basis: "inferred" });
+      if (!["docs", "doc", "gov", "govt", "gov't", "dept", "org", "orgs", "univ", "uni", "intl", "natl", "info", "stats", "pubs", "uk", "us", "usa", "eu", "uae"].includes(abbr)) expansions.push({ term: abbr, of: full, relation: "abbreviation", basis: "inferred" });
     }
   }
   for (const [uk, us] of SPELLING) if (text.includes(uk)) expansions.push({ term: us, of: uk, relation: "spelling", basis: "inferred" });
@@ -285,6 +285,9 @@ export function understandQuery(question: string, opts: { previous?: QueryPlan |
   for (const w of words(original)) {
     const org = ACRONYMS[w];
     if (org && (w.length > 2 || original.includes(w.toUpperCase()))) {
+      // "who" and "un" are also ordinary words: read them as organisations only when written in capitals or used as a source.
+      if (["who", "un"].includes(w) && !original.includes(w.toUpperCase()) && !new RegExp(`\\b${w}\\s+(?:reports?|documents?|guidelines?|publications?|data|papers?|statistics)\\b`).test(normalized)) continue;
+      if (["who", "un"].includes(w) && !original.includes(w.toUpperCase())) uncertain.push(`Read "${w}" as ${org.name}.`);
       entities.push({ text: w.toUpperCase(), type: "organization", value: org.name, basis: "inferred" });
       expansions.push({ term: org.name.toLowerCase(), of: w, relation: "acronym", basis: "inferred" });
       const funded = new RegExp(`\\bfunded by\\s+(?:the\\s+)?${w}\\b`).test(normalized);
