@@ -18,6 +18,27 @@ function addDate(ctx: ExtractionContext, cat: number, field: string, raw: unknow
   if (d) ctx.add(cat, field, d.iso, { method, original: d.original });
 }
 
+
+// Many producers write UTF-8 bytes into PDFDocEncoded Info strings; read as PDFDocEncoding, "Ü" becomes "Ãœ".
+// Map the characters back to their bytes and keep the UTF-8 reading when it is valid.
+const PDFDOC_HIGH: Record<number, number> = { 0x2022: 0x80, 0x2020: 0x81, 0x2021: 0x82, 0x2026: 0x83, 0x2014: 0x84, 0x2013: 0x85, 0x192: 0x86, 0x2044: 0x87, 0x2039: 0x88, 0x203a: 0x89, 0x2212: 0x8a, 0x2030: 0x8b, 0x201e: 0x8c, 0x201c: 0x8d, 0x201d: 0x8e, 0x2018: 0x8f, 0x2019: 0x90, 0x201a: 0x91, 0x2122: 0x92, 0xfb01: 0x93, 0xfb02: 0x94, 0x141: 0x95, 0x152: 0x96, 0x160: 0x97, 0x178: 0x98, 0x17d: 0x99, 0x131: 0x9a, 0x142: 0x9b, 0x153: 0x9c, 0x161: 0x9d, 0x17e: 0x9e, 0x20ac: 0xa0 };
+export function repairPdfDocUtf8(value: unknown): unknown {
+  if (typeof value !== "string" || !/[\u00c2-\u00f4]/.test(value)) return value;
+  const bytes: number[] = [];
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!;
+    const b = cp < 0x80 || (cp >= 0xa1 && cp <= 0xff) ? cp : PDFDOC_HIGH[cp];
+    if (b === undefined) return value;
+    bytes.push(b);
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+    return text.length < value.length ? text : value;
+  } catch {
+    return value;
+  }
+}
+
 export const pdfExtractor: Extractor = {
   id: "pdf",
   version: "1.0.0",
@@ -82,7 +103,7 @@ export const pdfExtractor: Extractor = {
     if (first) ctx.add(C.technical, "pageSizePt", { width: Math.round(first.width), height: Math.round(first.height) }, { status: "observed", method: "page 1 MediaBox" });
     const info = (k: string) => {
       try {
-        return clean((doc as unknown as Record<string, () => unknown>)[`get${k}`]?.call(doc));
+        return clean(repairPdfDocUtf8((doc as unknown as Record<string, () => unknown>)[`get${k}`]?.call(doc)));
       } catch {
         return null;
       }

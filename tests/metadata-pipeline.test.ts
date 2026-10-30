@@ -339,3 +339,13 @@ describe("search text", () => {
     expect(String(shared.get("plainText"))).toMatch(/About/);
   });
 });
+
+import { repairPdfDocUtf8 } from "../src/metadata/extractors/documents.js";
+describe("pdf info strings", () => {
+  it("repairs UTF-8 written into PDFDocEncoded titles and leaves real text alone", () => {
+    expect(repairPdfDocUtf8("DURCHFÃœHRUNG GENNEMFÃŸRELSE")).toBe("DURCHFÜHRUNG GENNEMFØRELSE");
+    expect(repairPdfDocUtf8("Ãœber")).toBe("Über");
+    expect(repairPdfDocUtf8("Café à Paris")).toBe("Café à Paris");
+    expect(repairPdfDocUtf8("Plain title")).toBe("Plain title");
+  });
+});
