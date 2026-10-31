@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import type { MetadataField, ResourceRecord } from "../metadata/types.js";
 import { metaText, recordBlob, rowToField, toPattern, valueText } from "./store.js";
-import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord } from "./types.js";
+import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord, type StoredText } from "./types.js";
+import { redactForIndex, redactSecrets } from "../text/secrets.js";
 
 /**
  * Postgres corpus for multi-service deployments: any number of API replicas
@@ -359,7 +360,7 @@ export class PgCorpus implements Corpus {
         await client.query(
           `INSERT INTO corpus_docs (resource_id, title, description, meta, body, url) VALUES ($1,$2,$3,$4,$5,$6)
            ON CONFLICT (resource_id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, meta = EXCLUDED.meta, body = EXCLUDED.body, url = EXCLUDED.url`,
-          [resourceId, record.title ?? "", record.description ?? "", metaText(record), opts.text.slice(0, TEXT_EXCERPT).replace(/\u0000/g, ""), record.finalUrl],
+          [resourceId, redactSecrets(record.title ?? "").text, redactSecrets(record.description ?? "").text, redactSecrets(metaText(record)).text, redactForIndex(opts.text, TEXT_EXCERPT).replace(/\u0000/g, ""), record.finalUrl],
         );
         await client.query(`UPDATE corpus_docs SET rank_tsv = ${RANK_TSV} WHERE resource_id = $1`, [resourceId]);
       } else await client.query(`DELETE FROM corpus_docs WHERE resource_id = $1`, [resourceId]);
@@ -563,6 +564,18 @@ export class PgCorpus implements Corpus {
        ORDER BY (category = ANY($3::smallint[])) DESC, id LIMIT $4`,
       params,
     )).rows.map(rowToField);
+  }
+
+  async documentTexts(ids: number[]): Promise<Map<number, StoredText>> {
+    const out = new Map<number, StoredText>();
+    if (!ids.length) return out;
+    const rows = (await this.q<{ resource_id: string; title: string | null; description: string | null; body: string | null; url: string | null }>(`SELECT resource_id, title, description, body, url FROM corpus_docs WHERE resource_id = ANY($1::bigint[])`, [ids])).rows;
+    for (const r of rows) out.set(Number(r.resource_id), { resourceId: Number(r.resource_id), url: r.url ?? "", title: r.title ?? "", description: r.description ?? "", body: r.body ?? "" });
+    return out;
+  }
+
+  async recentIndexedIds(limit: number): Promise<number[]> {
+    return (await this.q<{ id: string }>(`SELECT id FROM resources WHERE state = 'indexed' AND duplicate_of IS NULL ORDER BY indexed_at DESC NULLS LAST, id DESC LIMIT $1`, [limit])).rows.map((r) => Number(r.id));
   }
 
   async categoryCounts(snapshotId: number) {

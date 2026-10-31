@@ -106,6 +106,15 @@ export const SYSTEM_RETENTION = {
 
 export const TEXT_EXCERPT = 100_000;
 
+/** Searchable text stored for an indexed resource (secrets redacted before storage; body capped at TEXT_EXCERPT UTF-16 units). */
+export interface StoredText {
+  resourceId: number;
+  url: string;
+  title: string;
+  description: string;
+  body: string;
+}
+
 /**
  * Persistent corpus: crawl frontier, per-stage state, snapshots, field-level
  * observations, relationships, crawler events and a full-text index.
@@ -171,6 +180,11 @@ export interface Corpus {
   categoryCounts(snapshotId: number): Promise<Array<{ category: number; n: number }>>;
   linkedFrom(resourceId: number): Promise<LinkedResource[]>;
   linkedTo(resourceId: number): Promise<LinkedResource[]>;
+
+  // text intelligence: on-demand scans of the stored text excerpt
+  documentTexts(resourceIds: number[]): Promise<Map<number, StoredText>>;
+  /** Most recently indexed (non-duplicate) resource ids — bounded fallback when full-text search cannot pick candidates. */
+  recentIndexedIds(limit: number): Promise<number[]>;
 }
 
 export interface PatternStat {

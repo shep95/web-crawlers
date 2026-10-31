@@ -1,5 +1,5 @@
 /** Regenerates docs/COVERAGE.md by running the fixture corpus through the real pipeline. */
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { analyzeResponse } from "../src/metadata/pipeline.js";
 import { CATEGORIES } from "../src/metadata/categories.js";
 import { EXTRACTORS } from "../src/metadata/extractors/index.js";
@@ -27,5 +27,9 @@ for (const c of CATEGORIES) {
   const hit = results.filter((r) => r.rec.categories.find((x) => x.id === c.id)!.state === "observed").map((r) => r.name);
   lines.push(`| ${c.id} | ${c.name} | ${hit.length ? "Verified (offline fixtures)" : "Implemented, unverified offline"} | ${hit.join(", ") || "—"} | ${c.limitations} |`);
 }
-writeFileSync("docs/COVERAGE.md", lines.join("\n") + "\n");
+// Hand-written sections after this marker (e.g. text intelligence) are kept across regenerations.
+const MARKER = "<!-- hand-written sections below are preserved by npm run coverage:matrix -->";
+const previous = existsSync("docs/COVERAGE.md") ? readFileSync("docs/COVERAGE.md", "utf8") : "";
+const kept = previous.includes(MARKER) ? previous.slice(previous.indexOf(MARKER)) : "";
+writeFileSync("docs/COVERAGE.md", lines.join("\n") + "\n" + (kept ? `\n${kept.trimEnd()}\n` : ""));
 console.log(`wrote docs/COVERAGE.md (${CATEGORIES.length} categories × ${results.length} fixtures)`);

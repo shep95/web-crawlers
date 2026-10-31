@@ -9,6 +9,7 @@ import { ocrExtractor } from "./ocr.js";
 import { httpExtractor } from "./http.js";
 import { audioVideoExtractor, imageExtractor } from "./media.js";
 import { emailExtractor, privacyExtractor, textExtractor } from "./text.js";
+import { textIntelligenceExtractor } from "./text-intel.js";
 
 /**
  * Extractor plugin registry. To add a format: implement `Extractor`
@@ -30,6 +31,7 @@ export const EXTRACTORS: Extractor[] = [
   emailExtractor,
   zipArchiveExtractor,
   privacyExtractor,
+  textIntelligenceExtractor,
   dnsExtractor,
   tlsExtractor,
   archiveExtractor,

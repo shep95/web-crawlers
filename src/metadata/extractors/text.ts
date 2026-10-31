@@ -3,6 +3,7 @@ import { C } from "../categories.js";
 import type { Extractor } from "../extractor.js";
 import { clean, findIdentifiers, maskEmail, normalizeDate, personalDataIndicators } from "../normalize.js";
 import { mineResearchText } from "./research-text.js";
+import { countWords } from "../../text/segment.js";
 
 type Json = Record<string, unknown>;
 const arr = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))) : v ? [String(v)] : []);
@@ -18,7 +19,7 @@ export const textExtractor: Extractor = {
     const text = await ctx.text();
     const lines = text.split(/\r?\n/);
     ctx.add(C.structural, "lineCount", lines.length, { status: "observed", method: "line count" });
-    ctx.add(C.structural, "wordCount", text.split(/\s+/).filter(Boolean).length, { status: "observed", method: "word count" });
+    ctx.add(C.structural, "wordCount", countWords(text), { status: "observed", method: "word count (Intl.Segmenter word boundaries)" });
     const mdHeadings = lines.filter((l) => /^#{1,6}\s/.test(l)).slice(0, 40).map((l) => ({ level: l.match(/^#+/)![0].length, text: clean(l.replace(/^#+\s*/, ""), 160) }));
     ctx.add(C.structural, "headingOutline", mdHeadings, { status: "observed", method: "markdown headings" });
     const h1 = mdHeadings.find((h) => h.level === 1)?.text;

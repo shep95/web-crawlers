@@ -1,6 +1,7 @@
 import { C } from "../categories.js";
 import { listZipEntries, readZipEntry } from "../zip.js";
 import { mineResearchText } from "./research-text.js";
+import { countWords } from "../../text/segment.js";
 import type { ExtractionContext, Extractor } from "../extractor.js";
 import { clean, findIdentifiers, normalizeDate, splitKeywords } from "../normalize.js";
 
@@ -142,7 +143,7 @@ export const pdfExtractor: Extractor = {
       const { text } = await extractText(proxy, { mergePages: true });
       const plain = (Array.isArray(text) ? text.join("\n") : text).replace(/\s+/g, " ").trim().slice(0, 400_000);
       ctx.shared.set("plainText", plain);
-      ctx.add(C.document, "wordCount", plain ? plain.split(" ").length : 0, { status: "observed", method: "pdf text layer word count" });
+      ctx.add(C.document, "wordCount", plain ? countWords(plain) : 0, { status: "observed", method: "pdf text layer word count (Intl.Segmenter word boundaries)" });
       if (!plain && pages) ctx.add(C.accessibility, "textLayer", false, { status: "observed", method: "pdf text extraction", evidence: "no extractable text — likely scanned; OCR is not performed" });
       const ids = findIdentifiers(plain);
       ctx.add(C.identifiers, "doi", ids.doi, { method: "doi pattern in pdf text" });

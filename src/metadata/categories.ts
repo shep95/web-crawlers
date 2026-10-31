@@ -438,3 +438,17 @@ for (const c of CATEGORIES) {
   if (!ext) throw new Error(`category ${c.id} lacks an extension entry`);
   Object.assign(c.fields, ext.extended);
 }
+
+/** Text-intelligence fields (src/text/*, extractor text-intel): summaries only — character-level detail is computed on demand. */
+const TEXT_INTELLIGENCE: Record<number, { method: string; fields: Record<string, FieldType> }> = {
+  1: { method: "text-intel language inference (eld n-grams) + \\p{Script}", fields: { detectedLanguage: "object", scripts: "array" } },
+  2: { method: "Intl.Segmenter graphemes/words/sentences (UAX #29)", fields: { graphemeCount: "number", codePointCount: "number", sentenceCount: "number", paragraphCount: "number" } },
+  4: { method: "text-intel encoding/BOM/normalization scan", fields: { textEncoding: "object", unicodeNormalization: "object" } },
+  39: { method: "credential patterns (values redacted)", fields: { secretsDetected: "object", credentialExposureWarning: "boolean" } },
+  41: { method: "invisible/bidi/homoglyph text scan", fields: { invisibleCharacters: "object", bidiControls: "object", confusableWords: "object", textSpoofingRisk: "boolean" } },
+};
+for (const [id, t] of Object.entries(TEXT_INTELLIGENCE)) {
+  const c = CATEGORY_BY_ID.get(Number(id))!;
+  Object.assign(c.fields, t.fields);
+  c.methods.push(t.method);
+}

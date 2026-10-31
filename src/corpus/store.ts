@@ -5,7 +5,8 @@ import { dirname } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import type { MetadataField, ResourceRecord } from "../metadata/types.js";
-import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord } from "./types.js";
+import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord, type StoredText } from "./types.js";
+import { redactForIndex, redactSecrets } from "../text/secrets.js";
 
 export * from "./types.js";
 
@@ -282,7 +283,7 @@ export class SqliteCorpus implements Corpus {
       for (const o of old) this.db.prepare(`DELETE FROM snapshots WHERE id = ?`).run(o.id);
       this.db.prepare(`UPDATE resources SET snapshot_count = (SELECT COUNT(*) FROM snapshots WHERE resource_id = ?) WHERE id = ?`).run(resourceId, resourceId);
       this.db.prepare(`DELETE FROM corpus_fts WHERE rowid = ?`).run(resourceId);
-      if (opts.index) this.db.prepare(`INSERT INTO corpus_fts (rowid, title, description, meta, body, url) VALUES (?, ?, ?, ?, ?, ?)`).run(resourceId, record.title ?? "", record.description ?? "", metaText(record), opts.text.slice(0, TEXT_EXCERPT), record.finalUrl);
+      if (opts.index) this.db.prepare(`INSERT INTO corpus_fts (rowid, title, description, meta, body, url) VALUES (?, ?, ?, ?, ?, ?)`).run(resourceId, redactSecrets(record.title ?? "").text, redactSecrets(record.description ?? "").text, redactSecrets(metaText(record)).text, redactForIndex(opts.text, TEXT_EXCERPT), record.finalUrl);
       return sid;
     })();
   }
@@ -463,6 +464,18 @@ export class SqliteCorpus implements Corpus {
     return (this.db
       .prepare(`SELECT * FROM observations WHERE snapshot_id = ? AND masked = 0 AND category NOT IN (20, 22) AND (${matchSql}${catSql}) ORDER BY ${prefer} DESC, id LIMIT ?`)
       .all(snapshotId, ...like, ...categories, limit) as Array<Record<string, unknown>>).map(rowToField);
+  }
+
+  async documentTexts(ids: number[]): Promise<Map<number, StoredText>> {
+    const out = new Map<number, StoredText>();
+    if (!ids.length) return out;
+    const rows = this.db.prepare(`SELECT rowid AS id, title, description, body, url FROM corpus_fts WHERE rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Array<{ id: number; title: string | null; description: string | null; body: string | null; url: string | null }>;
+    for (const r of rows) out.set(Number(r.id), { resourceId: Number(r.id), url: r.url ?? "", title: r.title ?? "", description: r.description ?? "", body: r.body ?? "" });
+    return out;
+  }
+
+  async recentIndexedIds(limit: number): Promise<number[]> {
+    return (this.db.prepare(`SELECT id FROM resources WHERE state = 'indexed' AND duplicate_of IS NULL ORDER BY indexed_at DESC, id DESC LIMIT ?`).all(limit) as Array<{ id: number }>).map((r) => Number(r.id));
   }
 
   async categoryCounts(snapshotId: number) {
