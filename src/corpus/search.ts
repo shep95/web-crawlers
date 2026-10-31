@@ -138,6 +138,28 @@ export function titleMatch(title: string | null | undefined, terms: string[]): {
   return { matchedIn: terms.length && titleTerms === terms.length ? "title" : "text", titleTerms };
 }
 
+// A results page is more useful when one site doesn't fill it: identical title+site copies collapse, and a site's
+// third and later results move below other sites' results (kept, just lower). Order is otherwise preserved.
+export function diversify<T extends { r: { host?: string | null; title?: string | null } }>(list: T[], perHost = 2): T[] {
+  const seenTitle = new Set<string>();
+  const unique = list.filter(({ r }) => {
+    const key = `${r.host ?? ""}|${(r.title ?? "").trim().toLowerCase()}`;
+    if (r.title && seenTitle.has(key)) return false;
+    seenTitle.add(key);
+    return true;
+  });
+  const counts = new Map<string, number>();
+  const head: T[] = [], tail: T[] = [];
+  for (const item of unique) {
+    const host = (item.r.host ?? "").replace(/^www\./, "");
+    const n = (counts.get(host) ?? 0) + 1;
+    counts.set(host, n);
+    (n <= perHost ? head : tail).push(item);
+  }
+  list.splice(0, list.length, ...head, ...tail);
+  return list;
+}
+
 // Crawl plumbing (sitemaps, robots, feeds of links) and untitled files are rarely what a person searched for.
 const PLUMBING = /\/(?:[^/]*sitemap[^/]*\.xml(?:\.gz)?|robots\.txt|feed\/?|rss(?:\.xml)?|atom\.xml)(?:$|\?)/i;
 export function plumbingPenalty(r: Pick<SearchCandidate, "url" | "title">): number {
@@ -172,6 +194,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
     return { r, score: r.rank * typeBoost * (0.6 + coverageRatio) * (1 + 1.5 * titleRatio) * plumbingPenalty(r) };
   });
   scored.sort((a, b) => b.score - a.score);
+  diversify(scored);
 
   // Batched loading: a constant number of queries per search, regardless of how many results.
   const top = scored.slice(0, limit);

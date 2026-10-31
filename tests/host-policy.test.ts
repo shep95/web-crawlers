@@ -113,3 +113,16 @@ describe.runIf(process.env.TEST_DATABASE_URL)("compact rank vectors [postgres]",
     }
   });
 });
+
+import { diversify } from "../src/corpus/search.js";
+describe("result diversity", () => {
+  it("collapses identical title+site copies and moves a site's third result below other sites", () => {
+    const items = [
+      { r: { host: "waters.house.gov", title: "Copyright" } }, { r: { host: "waters.house.gov", title: "DC Office" } }, { r: { host: "waters.house.gov", title: "District Office" } },
+      { r: { host: "phys.org", title: "Chernobyl dogs" } }, { r: { host: "phys.org", title: "Chernobyl dogs" } }, { r: { host: "www.usgs.gov", title: "Water resources" } },
+    ];
+    expect(diversify(items).map((x) => `${x.r.host}:${x.r.title}`)).toEqual([
+      "waters.house.gov:Copyright", "waters.house.gov:DC Office", "phys.org:Chernobyl dogs", "www.usgs.gov:Water resources", "waters.house.gov:District Office",
+    ]);
+  });
+});
