@@ -401,7 +401,10 @@ export function understandQuery(question: string, opts: { previous?: QueryPlan |
 
   if (!topicTerms.length) uncertain.push("No clear topic; results match the other conditions only.");
   // Search text: the topic words plus exact phrases; discovery queries add the structure back in words a web search understands.
+  // A search is never empty: when every word was read as structure ("images", "india", "nasa", "who"), search the words typed.
+  const typedWords = words(original).filter((w) => !["a", "an", "the", "of", "for", "to", "in", "on", "and", "or", "find", "search", "show", "me", "please"].includes(w));
   const searchTerms = [...new Set([...topicTerms, ...exactPhrases.flatMap((p) => words(p))])].slice(0, 12);
+  if (!searchTerms.length) searchTerms.push(...(typedWords.length ? typedWords : words(original)).slice(0, 12));
   const pub = constraints.publisher;
   const site = pub?.hostSuffixes.find((h) => h.includes("."));
   const yearText = constraints.dates ? (constraints.dates.from === constraints.dates.to ? String(constraints.dates.from) : `${constraints.dates.from}..${constraints.dates.to}`) : "";

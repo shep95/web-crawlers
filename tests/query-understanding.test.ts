@@ -152,3 +152,22 @@ describe("live-run corrections", () => {
     expect(res.evaluation).toMatchObject({ verified: 1, partlyVerified: 1 });
   });
 });
+
+describe("simple searches", () => {
+  it("always searches something: one-word queries that are also structure words keep the typed words", () => {
+    for (const q of ["data", "images", "papers", "report", "documents", "china", "india", "nasa", "who", "hello", "news", "the beatles"]) {
+      expect(u(q).searchTerms.length, q).toBeGreaterThan(0);
+    }
+    expect(u("india").searchTerms).toEqual(["india"]);
+    expect(u("the beatles").searchTerms).toEqual(["beatles"]);
+  });
+
+  it("runs the index search for a one-word query and returns its results", async () => {
+    searchMock.mockReset();
+    searchMock.mockResolvedValue(rows([base(3, "isro.gov.in", { title: "India space programme", matchedIn: "title" })]));
+    const res = await askCorpus({} as never, u("india"), { limit: 10 });
+    expect(searchMock).toHaveBeenCalled();
+    expect(searchMock.mock.calls[0][1]).toBe("india");
+    expect(res.results.length).toBe(1);
+  });
+});
