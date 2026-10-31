@@ -11,6 +11,7 @@ import { detectChanges } from "../crawl/changes.js";
 import { getEgressMode } from "../net/safe-fetch.js";
 import { ApiKeys, ClientRateLimiter, LatencyStats, openSse } from "./guards.js";
 import { openApiSpec } from "./openapi.js";
+import { registerGeographyRoutes } from "./geo-routes.js";
 
 const bool = z.union([z.boolean(), z.enum(["true", "false", "1", "0"]).transform((v) => v === "true" || v === "1")]);
 const AnalyzeQuery = z.object({
@@ -75,7 +76,7 @@ export async function registerV2(app: FastifyInstance, deps: V2Deps) {
   app.addHook("onRequest", async (req, reply) => {
     const path = req.url.split("?")[0];
     if (!path.startsWith("/api/v2/")) return;
-    if (deps.keys.enabled && !open.has(path) && !deps.keys.verify(ApiKeys.tokenFrom(req) ?? (req.query as Record<string, string> | undefined)?.key)) {
+    if (deps.keys.enabled && !open.has(path) && !path.startsWith("/api/v2/geography") && !deps.keys.verify(ApiKeys.tokenFrom(req) ?? (req.query as Record<string, string> | undefined)?.key)) {
       return reply.code(401).send({ error: "UNAUTHORIZED", message: "Provide an API key via Authorization: Bearer <key> or X-API-Key." });
     }
     const limiter = heavyRoutes.has(path) || (path === "/api/v2/analyze" && /[?&]fresh=(1|true)/.test(req.url)) ? heavy : general;
@@ -104,6 +105,7 @@ export async function registerV2(app: FastifyInstance, deps: V2Deps) {
   // Static registry responses are serialised once.
   const categoriesJson = JSON.stringify({ count: CATEGORIES.length, categories: CATEGORIES.map((c) => ({ ...c, supportingDiscovery: CATEGORY_EXTENSIONS[c.id].supportingDiscovery?.source ?? null, validation: CATEGORY_EXTENSIONS[c.id].validation })) });
   app.get("/api/v2/categories", async (_req, reply) => reply.header("cache-control", "public, max-age=3600").type("application/json; charset=utf-8").send(categoriesJson));
+  registerGeographyRoutes(app);
   app.get("/api/v2/extractors", async () => ({
     count: EXTRACTORS.length,
     extractors: EXTRACTORS.map((e) => ({ id: e.id, version: e.version, description: e.description, kinds: e.kinds, categories: e.categories, needsNetwork: Boolean(e.needsNetwork), phase: e.phase ?? "local", timeoutMs: e.timeoutMs })),

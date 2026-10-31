@@ -12,6 +12,7 @@
  * "uncertain" (a guess the results must confirm). Expansions are candidate search terms, never substitutes.
  * Deterministic rules on purpose: each interpretation is explainable, testable and fast.
  */
+import { domainsFor, findPlaces, placeName } from "../geo/registry.js";
 
 export type Basis = "stated" | "inferred" | "uncertain";
 export type Strength = "hard" | "soft";
@@ -36,7 +37,12 @@ export interface QueryPlan {
   relationships: Relationship[];
   constraints: {
     publisher?: { category: "government" | "academic" | "company" | "nonprofit" | "international"; country?: string; organization?: string; hostSuffixes: string[]; strength: Strength; basis: Basis; mode: "published_by" | "associated_with" };
-    geography?: { country: string; code: string; strength: Strength; basis: Basis };
+    /**
+     * One country the request is restricted to. `role` says how: "subject" (documents about it) or "publisher"
+     * (published by its government / institutions). `country` is the registry's common name, `code` ISO alpha-2
+     * (or a non-ISO code such as EU / XK); `candidates` lists the other readings of an uncertain name.
+     */
+    geography?: { country: string; code: string; role: "subject" | "publisher"; strength: Strength; basis: Basis; candidates?: string[] };
     dates?: { from: number; to: number; field: "published"; strength: Strength; basis: Basis; text: string };
     types?: { kinds: string[]; label: string; strength: Strength; basis: Basis };
     languages?: { codes: string[]; strength: Strength; basis: Basis };
@@ -86,38 +92,25 @@ const ACRONYMS: Record<string, Org> = {
   ons: { name: "Office for National Statistics", country: "GB", category: "government", hosts: ["ons.gov.uk"] },
   nhs: { name: "NHS", country: "GB", category: "government", hosts: ["nhs.uk"] },
 };
-interface Country { code: string; names: string[]; demonyms: string[]; gov: string[]; academic: string[]; languages: string[] }
-const COUNTRIES: Country[] = [
-  { code: "IN", names: ["india"], demonyms: ["indian"], gov: ["gov.in", "nic.in"], academic: ["ac.in", "edu.in"], languages: ["en", "hi"] },
-  { code: "US", names: ["united states", "america"], demonyms: ["american", "us"], gov: ["gov", "mil"], academic: ["edu"], languages: ["en"] },
-  { code: "GB", names: ["united kingdom", "britain", "england", "scotland", "wales"], demonyms: ["british", "english", "scottish", "welsh"], gov: ["gov.uk", "nhs.uk", "parliament.uk", "gov.scot", "gov.wales"], academic: ["ac.uk"], languages: ["en"] },
-  { code: "CA", names: ["canada"], demonyms: ["canadian"], gov: ["gc.ca", "canada.ca"], academic: [], languages: ["en", "fr"] },
-  { code: "AU", names: ["australia"], demonyms: ["australian"], gov: ["gov.au"], academic: ["edu.au"], languages: ["en"] },
-  { code: "NZ", names: ["new zealand"], demonyms: ["new zealand"], gov: ["govt.nz"], academic: ["ac.nz"], languages: ["en"] },
-  { code: "IE", names: ["ireland"], demonyms: ["irish"], gov: ["gov.ie"], academic: [], languages: ["en", "ga"] },
-  { code: "SG", names: ["singapore"], demonyms: ["singaporean"], gov: ["gov.sg"], academic: ["edu.sg"], languages: ["en"] },
-  { code: "CN", names: ["china"], demonyms: ["chinese"], gov: ["gov.cn"], academic: ["edu.cn"], languages: ["zh"] },
-  { code: "JP", names: ["japan"], demonyms: ["japanese"], gov: ["go.jp"], academic: ["ac.jp"], languages: ["ja"] },
-  { code: "KR", names: ["south korea", "korea"], demonyms: ["korean", "south korean"], gov: ["go.kr"], academic: ["ac.kr"], languages: ["ko"] },
-  { code: "DE", names: ["germany"], demonyms: ["german"], gov: ["bund.de"], academic: [], languages: ["de"] },
-  { code: "FR", names: ["france"], demonyms: ["french"], gov: ["gouv.fr"], academic: [], languages: ["fr"] },
-  { code: "ES", names: ["spain"], demonyms: ["spanish"], gov: ["gob.es"], academic: [], languages: ["es"] },
-  { code: "IT", names: ["italy"], demonyms: ["italian"], gov: ["gov.it"], academic: [], languages: ["it"] },
-  { code: "EU", names: ["european union", "europe"], demonyms: ["european"], gov: ["europa.eu"], academic: [], languages: ["en", "fr", "de"] },
-  { code: "BR", names: ["brazil"], demonyms: ["brazilian"], gov: ["gov.br"], academic: [], languages: ["pt"] },
-  { code: "MX", names: ["mexico"], demonyms: ["mexican"], gov: ["gob.mx"], academic: [], languages: ["es"] },
-  { code: "ZA", names: ["south africa"], demonyms: ["south african"], gov: ["gov.za"], academic: ["ac.za"], languages: ["en"] },
-  { code: "NG", names: ["nigeria"], demonyms: ["nigerian"], gov: ["gov.ng"], academic: ["edu.ng"], languages: ["en"] },
-  { code: "KE", names: ["kenya"], demonyms: ["kenyan"], gov: ["go.ke"], academic: ["ac.ke"], languages: ["en", "sw"] },
-  { code: "PK", names: ["pakistan"], demonyms: ["pakistani"], gov: ["gov.pk"], academic: ["edu.pk"], languages: ["en", "ur"] },
-  { code: "BD", names: ["bangladesh"], demonyms: ["bangladeshi"], gov: ["gov.bd"], academic: ["ac.bd"], languages: ["bn"] },
-  { code: "ID", names: ["indonesia"], demonyms: ["indonesian"], gov: ["go.id"], academic: ["ac.id"], languages: ["id"] },
-  { code: "MY", names: ["malaysia"], demonyms: ["malaysian"], gov: ["gov.my"], academic: ["edu.my"], languages: ["ms", "en"] },
-  { code: "PH", names: ["philippines"], demonyms: ["filipino", "philippine"], gov: ["gov.ph"], academic: ["edu.ph"], languages: ["en", "tl"] },
-  { code: "IL", names: ["israel"], demonyms: ["israeli"], gov: ["gov.il"], academic: ["ac.il"], languages: ["he"] },
-  { code: "AE", names: ["united arab emirates"], demonyms: ["emirati"], gov: ["gov.ae"], academic: [], languages: ["ar", "en"] },
-  { code: "SA", names: ["saudi arabia"], demonyms: ["saudi"], gov: ["gov.sa"], academic: ["edu.sa"], languages: ["ar"] },
-];
+/** A country (or the EU / Kosovo from the non-ISO layer) read from the question, resolved through the geography registry. */
+interface Country { code: string; name: string; gov: string[]; academic: string[]; texts: string[]; uncertain?: string; candidates?: string[]; layer: "iso" | "non-iso" }
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A whole-word pattern that also works for non-Latin scripts (\b only knows ASCII word characters). */
+const wordRe = (texts: string[], flags = "u") => new RegExp(`(?<![\\p{L}\\p{N}\\p{M}])(?:${texts.map(escapeRe).join("|")})(?:'s)?(?![\\p{L}\\p{N}\\p{M}])`, flags);
+/** Places named in the question: every name, endonym, translation or demonym in the registry (longest first). */
+function countriesIn(body: string, original: string): Country[] {
+  // The body is lower-cased; abbreviations (UAE, DRC) and capitalised-only names (Chad, Jersey) are read from the original.
+  const inBody = findPlaces(body);
+  const found = [...inBody, ...findPlaces(original).filter((m) => (m.kind === "abbreviation" || m.text[0] !== m.text[0].toLowerCase()) && !inBody.some((b) => b.code === m.code) && body.includes(m.text.toLowerCase()))];
+  const out: Country[] = [];
+  for (const m of found) {
+    const had = out.find((c) => c.code === m.code);
+    if (had) { if (!had.texts.includes(m.text.toLowerCase())) had.texts.push(m.text.toLowerCase()); if (!m.uncertain) { delete had.uncertain; delete had.candidates; } continue; }
+    const d = domainsFor(m.code);
+    out.push({ code: m.code, name: placeName(m.code), gov: d.government, academic: d.academic, texts: [m.text.toLowerCase()], layer: m.layer, ...(m.uncertain ? { uncertain: m.uncertain, candidates: m.candidates } : {}) });
+  }
+  return out;
+}
 const LANGUAGES: Record<string, string> = { english: "en", hindi: "hi", french: "fr", german: "de", spanish: "es", chinese: "zh", mandarin: "zh", japanese: "ja", korean: "ko", arabic: "ar", portuguese: "pt", russian: "ru", urdu: "ur", bengali: "bn", tamil: "ta", italian: "it", hebrew: "he", swahili: "sw" };
 // Concept map: candidate discovery terms (never substitutes). Keys are canonical topics.
 const CONCEPTS: Record<string, Array<[string, Expansion["relation"]]>> = {
@@ -157,7 +150,7 @@ const ACTIONS: Array<[RegExp, Intent]> = [
 ];
 
 // ---------- helpers ----------
-const words = (s: string) => (s.toLowerCase().normalize("NFKC").match(/[\p{L}\p{N}][\p{L}\p{N}&'.-]*/gu) ?? []).map((w) => w.replace(/'s$/, "").replace(/[.'-]+$/, "")).filter(Boolean);
+const words = (s: string) => (s.toLowerCase().normalize("NFKC").match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}&'.-]*/gu) ?? []).map((w) => w.replace(/'s$/, "").replace(/[.'-]+$/, "")).filter(Boolean);
 function detectScript(s: string): string {
   const scripts: Array<[string, RegExp]> = [["Devanagari", /\p{Script=Devanagari}/u], ["Arabic", /\p{Script=Arabic}/u], ["Cyrillic", /\p{Script=Cyrillic}/u], ["Han", /\p{Script=Han}/u], ["Hangul", /\p{Script=Hangul}/u], ["Hebrew", /\p{Script=Hebrew}/u], ["Greek", /\p{Script=Greek}/u], ["Bengali", /\p{Script=Bengali}/u], ["Tamil", /\p{Script=Tamil}/u], ["Hiragana/Katakana", /[\p{Script=Hiragana}\p{Script=Katakana}]/u]];
   for (const [name, re] of scripts) if (re.test(s)) return name;
@@ -297,35 +290,58 @@ export function understandQuery(question: string, opts: { previous?: QueryPlan |
     }
   }
 
-  // Country + organisation category ("indian government", "published by the government of india", "uk universities").
-  const countries: Country[] = [];
-  for (const c of COUNTRIES) {
-    const nameHit = c.names.find((n) => new RegExp(`\\b${n}(?:'s)?\\b`).test(body));
-    const demHit = c.demonyms.find((d) => d !== "us" && new RegExp(`\\b${d}\\b`).test(body));
-    if (nameHit || demHit) { countries.push(c); entities.push({ text: (demHit ?? nameHit)!, type: "country", value: c.code, basis: "stated" }); }
+  // Countries (any name, endonym, translation or demonym in the geography registry) + organisation category
+  // ("indian government", "published by the government of india", "uk universities").
+  const countries = countriesIn(body, original);
+  for (const c of countries) {
+    entities.push({ text: c.texts[0], type: "country", value: c.code, basis: c.uncertain ? "uncertain" : "stated" });
+    if (c.uncertain) uncertain.push(`Read "${c.texts[0]}" as ${c.name} (${c.code}); ${c.uncertain}`);
   }
-  // Two or more countries (a comparison) are subjects, not one geographic filter.
-  const country: Country | undefined = countries.length === 1 ? countries[0] : undefined;
   const category: { cat: "government" | "academic" | "company" | "nonprofit" | "international"; text: string } | null =
     (body.match(/\b(?:government|governmental|ministry|ministries|federal|state|public sector|official|agency|agencies|department|departments|parliament(?:ary)?)\b/) && { cat: "government", text: body.match(/\b(?:government|governmental|ministry|ministries|federal|public sector|agency|agencies|department|departments|parliament(?:ary)?)\b/)?.[0] ?? "government" }) ||
     (body.match(/\b(?:universit(?:y|ies)|academic|college|colleges|institute of technology)\b/) && { cat: "academic", text: body.match(/\b(?:universit(?:y|ies)|academic|college|colleges)\b/)![0] }) ||
     (body.match(/\b(?:ngos?|non-profits?|nonprofits?|charit(?:y|ies)|foundations?)\b/) && { cat: "nonprofit", text: body.match(/\b(?:ngos?|non-profits?|nonprofits?|charit(?:y|ies)|foundations?)\b/)![0] }) ||
     (body.match(/\b(?:compan(?:y|ies)|corporate|industry)\b/) && !constraints.exclude.some((e) => e.what === "private companies") && { cat: "company", text: body.match(/\b(?:compan(?:y|ies)|corporate|industry)\b/)![0] }) ||
     null;
-  if (category && (category.cat !== "government" || /\b(?:government|governmental|ministry|ministries|federal|agency|agencies|department|parliament)/.test(body) || /\bofficial\b/.test(body))) {
+  const usesCategory = !!category && (category.cat !== "government" || /\b(?:government|governmental|ministry|ministries|federal|agency|agencies|department|parliament)/.test(body) || /\bofficial\b/.test(body));
+  // Publisher country vs subject country: "kenyan government data" / "the government of india" name the publisher;
+  // "documents about japan" / "rainfall in kenya" name what the documents are about.
+  const nameAlt = (c: Country) => `(?:${c.texts.map(escapeRe).join("|")})(?:'s)?`;
+  const statedAbout = (c: Country) => new RegExp(`\\b(?:about|on|regarding|concerning|covering|in|of|for|across|within|inside)\\s+(?:the\\s+)?${nameAlt(c)}(?![\\p{L}\\p{N}\\p{M}])`, "u").test(body);
+  const publishes = (c: Country) => usesCategory && new RegExp(`(?<![\\p{L}\\p{N}\\p{M}])${nameAlt(c)}\\s+(?:[\\p{L}-]+\\s+)?${category!.text}|${category!.text}\\s+(?:of|in)\\s+(?:the\\s+)?${nameAlt(c)}(?![\\p{L}\\p{N}\\p{M}])`, "u").test(body);
+  let pubCountry: Country | undefined = countries.find(publishes);
+  if (!pubCountry && usesCategory && !constraints.publisher && countries.length === 1 && !statedAbout(countries[0])) pubCountry = countries[0];
+  // "published by the european union" / "issued by india": the place itself is named as the publisher.
+  const namedPublisher = !pubCountry && !constraints.publisher ? countries.find((c) => new RegExp(`\\b(?:published|issued|produced|released|written|authored)\\s+by\\s+(?:the\\s+)?${nameAlt(c)}(?![\\p{L}\\p{N}\\p{M}])`, "u").test(body)) : undefined;
+  if (namedPublisher) {
+    pubCountry = namedPublisher;
+    const intl = namedPublisher.layer === "non-iso";
+    constraints.publisher = { category: intl ? "international" : "government", country: namedPublisher.code, hostSuffixes: namedPublisher.gov, strength: "hard", basis: "inferred", mode: "published_by" };
+    relationships.push({ subject: "documents", predicate: "published_by", object: namedPublisher.name, basis: "stated" });
+    if (!intl) uncertain.push(`Read "published by ${namedPublisher.texts[0]}" as published by ${namedPublisher.name}'s public bodies.`);
+    if (!namedPublisher.gov.length) uncertain.push(`No known web domains for public bodies of ${namedPublisher.name}; the publisher will be checked from page metadata.`);
+  }
+  const subjects = countries.filter((c) => c !== pubCountry);
+  if (category && usesCategory) {
     // "documents published by the X government" → publisher; "documents about the X government" → topic association only.
-    const about = new RegExp(`\\babout\\s+(?:the\\s+)?(?:\\w+\\s+){0,2}${category.text}`).test(body) && !/\b(?:by|from)\s+(?:the\s+)?(?:\w+\s+){0,2}(?:government|agenc|ministr|universit)/.test(body);
-    const hosts = category.cat === "government" ? country ? country.gov : ["gov", "gov.uk", "gov.in", "gc.ca", "gov.au", "europa.eu", "int"] : category.cat === "academic" ? country ? (country.academic.length ? country.academic : []) : ["edu", "ac.uk", "ac.in"] : [];
-    if (!constraints.publisher) constraints.publisher = { category: category.cat, country: country?.code, hostSuffixes: hosts, strength: about ? "soft" : "hard", basis: about ? "inferred" : "stated", mode: about ? "associated_with" : "published_by" };
-    entities.push({ text: (country ? (body.match(new RegExp(`\\b(?:${[...country.demonyms, ...country.names].join("|")})\\s+${category.text}`))?.[0] ?? category.text) : category.text), type: "organization_category", value: category.cat + (country ? `:${country.code}` : ""), basis: "stated" });
-    relationships.push({ subject: "documents", predicate: about ? "about" : "published_by", object: `${country ? country.names[0] + " " : ""}${category.cat}`, basis: about ? "inferred" : "stated" });
-    if (!hosts.length) uncertain.push(`No known web domains for ${category.cat} sources${country ? " in " + country.names[0] : ""}; the publisher will be checked from page metadata.`);
+    const about = new RegExp(`\\babout\\s+(?:the\\s+)?(?:\\S+\\s+){0,2}${category.text}`, "u").test(body) && !/\b(?:by|from)\s+(?:the\s+)?(?:\w+\s+){0,2}(?:government|agenc|ministr|universit)/.test(body);
+    const hosts = category.cat === "government" ? pubCountry ? pubCountry.gov : ["gov", "gov.uk", "gov.in", "gc.ca", "gov.au", "europa.eu", "int"] : category.cat === "academic" ? pubCountry ? pubCountry.academic : ["edu", "ac.uk", "ac.in"] : [];
+    if (!constraints.publisher) constraints.publisher = { category: category.cat, country: pubCountry?.code, hostSuffixes: hosts, strength: about ? "soft" : "hard", basis: about ? "inferred" : "stated", mode: about ? "associated_with" : "published_by" };
+    entities.push({ text: pubCountry ? body.match(new RegExp(`${nameAlt(pubCountry)}\\s+${category.text}`, "u"))?.[0] ?? category.text : category.text, type: "organization_category", value: category.cat + (pubCountry ? `:${pubCountry.code}` : ""), basis: "stated" });
+    relationships.push({ subject: "documents", predicate: about ? "about" : "published_by", object: `${pubCountry ? pubCountry.name + " " : ""}${category.cat}`, basis: about ? "inferred" : "stated" });
+    if (!hosts.length && (category.cat === "government" || category.cat === "academic")) uncertain.push(`No known web domains for ${category.cat} sources${pubCountry ? " in " + pubCountry.name : ""}; the publisher will be checked from page metadata.`);
   }
-  if (countries.length > 1) relationships.push({ subject: "documents", predicate: "about", object: countries.map((c) => c.names[0]).join(" and "), basis: "stated" });
-  if (country) {
-    constraints.geography = { country: country.names[0], code: country.code, strength: constraints.publisher ? "hard" : "soft", basis: "stated" };
-    if (!constraints.publisher) relationships.push({ subject: "documents", predicate: "located_in", object: country.names[0], basis: "inferred" });
+  // Two or more subject countries (a comparison) are subjects, not one geographic filter.
+  if (subjects.length > 1) relationships.push({ subject: "documents", predicate: "about", object: subjects.map((c) => c.name).join(" and "), basis: "stated" });
+  const subject = subjects.length === 1 ? subjects[0] : undefined;
+  if (subject) {
+    const explicit = statedAbout(subject);
+    constraints.geography = { country: subject.name, code: subject.code, role: "subject", strength: explicit ? "hard" : "soft", basis: subject.uncertain ? "uncertain" : "stated", ...(subject.candidates ? { candidates: subject.candidates } : {}) };
+    relationships.push({ subject: "documents", predicate: explicit ? "about" : "located_in", object: subject.name, basis: explicit ? "stated" : "inferred" });
+  } else if (pubCountry && !subjects.length) {
+    constraints.geography = { country: pubCountry.name, code: pubCountry.code, role: "publisher", strength: "hard", basis: pubCountry.uncertain ? "uncertain" : "stated", ...(pubCountry.candidates ? { candidates: pubCountry.candidates } : {}) };
   }
+  const country: Country | undefined = pubCountry ?? subject;
   if (/\bofficial\b/.test(body)) constraints.quality = "official";
   if (/\boriginal\b/.test(body)) constraints.quality = constraints.quality ?? "original";
 
@@ -364,11 +380,13 @@ export function understandQuery(question: string, opts: { previous?: QueryPlan |
   else {
     topicPhrase = body.replace(structure, " ");
   }
-  for (const c of countries) for (const n of [...c.names, ...c.demonyms]) topicPhrase = topicPhrase.replace(new RegExp(`\\b${n}(?:'s)?\\b`, "g"), " ");
+  for (const c of countries) topicPhrase = topicPhrase.replace(wordRe(c.texts, "gu"), " ");
   topicPhrase = topicPhrase.replace(/\b(?:how many|how much|how|what|when|who|whom|where|why|which|were|was|is|are|do|does|did|compare|comparison|versus|vs|difference between|show me|tell me)\b/g, " ");
   topicPhrase = topicPhrase.replace(structure, (w) => (/^(?:data|research)$/.test(w) ? w : " ")).replace(/\s+/g, " ").trim();
   let topicTerms = [...new Set(words(topicPhrase).filter((w) => !STOP.has(w) && w.length > 1))];
   if (!topicTerms.length && exactPhrases.length) topicTerms = words(exactPhrases.join(" "));
+  // "documents about japan": when the subject country is all there is, it is the topic.
+  if (!topicTerms.length && subject) topicTerms = [...new Set(words(subject.texts[0]))];
   topicPhrase = topicTerms.join(" ");
   if (topicPhrase) entities.push({ text: topicPhrase, type: "topic", value: topicPhrase, basis: "stated" });
 
@@ -410,9 +428,9 @@ export function understandQuery(question: string, opts: { previous?: QueryPlan |
   const yearText = constraints.dates ? (constraints.dates.from === constraints.dates.to ? String(constraints.dates.from) : `${constraints.dates.from}..${constraints.dates.to}`) : "";
   const typeWord = constraints.types?.kinds.includes("pdf") ? "filetype:pdf" : constraints.types?.label === "datasets" ? "dataset" : "";
   const discoveryQueries = [...new Set([
-    [topicPhrase, pub?.organization ?? (pub ? `${country?.names[0] ?? ""} ${pub.category}` : country?.names[0] ?? ""), constraints.types?.label === "documents" ? "report" : "", yearText].join(" ").replace(/\s+/g, " ").trim(),
+    [topicPhrase, pub?.organization ?? (pub ? `${pubCountry?.name ?? ""} ${pub.category}` : country && !country.texts.some((t) => topicPhrase.includes(t)) ? country.name : ""), subject && pub && !topicPhrase.includes(subject.texts[0]) ? subject.name : "", constraints.types?.label === "documents" ? "report" : "", yearText].join(" ").replace(/\s+/g, " ").trim(),
     site ? [topicPhrase, `site:${site}`, typeWord].join(" ").replace(/\s+/g, " ").trim() : "",
-    ...expansions.filter((e) => e.relation !== "spelling").slice(0, 2).map((e) => [e.term, site ? `site:${site}` : country?.names[0] ?? "", typeWord].join(" ").replace(/\s+/g, " ").trim()),
+    ...expansions.filter((e) => e.relation !== "spelling").slice(0, 2).map((e) => [e.term, site ? `site:${site}` : country?.name ?? "", typeWord].join(" ").replace(/\s+/g, " ").trim()),
   ].filter((x) => x && x.length > 2))].slice(0, 4);
 
   // Confidence: start high, lose for each guess.
