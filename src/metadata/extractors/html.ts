@@ -3,6 +3,7 @@ import type { ExtractionContext, Extractor } from "../extractor.js";
 import { isType, ldString, ldStrings, ldTypes, ldUrl, type LdNode } from "../jsonld.js";
 import { clean, findIdentifiers, normalizeDate, splitKeywords } from "../normalize.js";
 import { mineResearchText } from "./research-text.js";
+import { countWords } from "../../text/segment.js";
 
 const CC_RE = /creativecommons\.org\/(licenses|publicdomain)\/([a-z-]+)\/(\d\.\d)?/i;
 const SPDX_HINT = /\b(MIT License|Apache License,? Version 2\.0|GNU General Public License|BSD \d-Clause|CC[- ]BY(?:[- ](?:SA|NC|ND))*[- ]\d\.\d|CC0)\b/i;
@@ -379,8 +380,8 @@ export const htmlExtractor: Extractor = {
       mc.find("script, style, nav, footer").remove();
       mineResearchText(ctx, blockText(mc), "page main content");
     }
-    const words = plain ? plain.split(" ").length : 0;
-    ctx.add(C.structural, "wordCount", words, { status: "observed", method: "body text word count" });
+    const words = plain ? countWords(plain, $("html").attr("lang")?.trim() || undefined) : 0;
+    ctx.add(C.structural, "wordCount", words, { status: "observed", method: "body text word count (Intl.Segmenter word boundaries)" });
 
     // Copyright line (©)
     const copy = plain.match(/(?:©|\(c\)|copyright)\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?)?[^.|·]{0,60}?(?=\s+(?:all rights|site ?map|privacy|terms|contact|about|deployed|\||·)|[.|·]|$)/i)?.[0];

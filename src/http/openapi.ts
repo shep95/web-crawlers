@@ -75,6 +75,28 @@ export function openApiSpec(serverUrl?: string) {
       "/api/v2/crawler/capabilities": { get: { summary: "Extractor reliability and learned URL-pattern yields", responses: { 200: { description: "Capabilities" } } } },
       "/api/v2/analyze": { get: { summary: "Inspect one public URL now (optional; crawling does not require it)", parameters: [{ name: "url", in: "query", required: true, schema: str }], responses: { 200: { description: "Record" }, 403: err, 451: err } } },
       "/api/v2/analyze/upload": { post: { summary: "Inspect an uploaded file (raw body; X-Filename / X-Content-Type headers)", requestBody: { content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } } }, responses: { 200: { description: "Record" }, 400: err } } },
+      "/api/v2/text/occurrences": {
+        get: {
+          summary: "Exact occurrences of a string in stored text (one resource, or across the index via full-text candidates), with line/column, UTF-8 byte, code-point, UTF-16 and grapheme offsets and ±60-character context. Offsets are relative to the stored, secret-redacted text excerpt — not the original file bytes",
+          parameters: [
+            { name: "q", in: "query", required: true, schema: { ...str, minLength: 1, maxLength: 200 }, example: "é" },
+            { name: "resource", in: "query", schema: { ...int, minimum: 1 }, description: "Corpus resource id; omit to search across the index" },
+            { name: "limit", in: "query", schema: { ...int, minimum: 1, maximum: 500 } },
+            { name: "candidates", in: "query", schema: { ...int, minimum: 1, maximum: 200 }, description: "Resources scanned when searching across the index (default 50)" },
+          ],
+          responses: { 200: { description: "Occurrences, query analysis (character analysis when q is one grapheme), offset basis and limits" }, 400: err, 404: err },
+        },
+      },
+      "/api/v2/text/analyze": {
+        get: {
+          summary: "Character (code point), grapheme, word, sentence and paragraph analysis of up to 2,000 code points: categories, scripts, UTF-8/UTF-16 encodings, normalization forms, invisible and bidi characters, homoglyphs, inferred language, redacted secrets",
+          parameters: [
+            { name: "text", in: "query", required: true, schema: { ...str, minLength: 1 }, description: "≤ 2,000 code points (also accepted as JSON {text, lang} via POST)" },
+            { name: "lang", in: "query", schema: str, description: "BCP 47 tag to segment with (default: detected language)" },
+          ],
+          responses: { 200: { description: "Analysis" }, 400: err },
+        },
+      },
       "/health": { get: { summary: "Liveness", responses: { 200: { description: "ok" } } } },
       "/ready": { get: { summary: "Readiness (503 while shutting down or overloaded)", responses: { 200: { description: "ready" }, 503: { description: "not ready" } } } },
     },

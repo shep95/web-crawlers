@@ -359,9 +359,13 @@ function assessQuality(
   if (pub.length && mod.length && Math.max(...mod) + 86400_000 < Math.min(...pub.map((f) => Date.parse(String(f.value))))) {
     flag("temporal.modified<published", fields.filter((f) => f.category === C.temporal && (f.field === "modified" || f.field === "published")));
   }
-  const langs = fields.filter((f) => f.category === C.descriptive && f.field === "language" && typeof f.value === "string");
-  const primary = new Set(langs.map((f) => String(f.value).toLowerCase().split(/[-_,\s]/)[0]));
+  // Inferred languages (detected from text) never make declarations "contradicted"; a disagreement is a note.
+  const langs = fields.filter((f) => f.category === C.descriptive && f.field === "language" && typeof f.value === "string" && f.status !== "inferred");
+  const primaryOf = (v: unknown) => String(v).toLowerCase().split(/[-_,\s]/)[0];
+  const primary = new Set(langs.map((f) => primaryOf(f.value)));
   if (primary.size > 1) flag("descriptive.language", langs);
+  const inferredLang = fields.find((f) => f.category === C.descriptive && f.field === "language" && f.status === "inferred");
+  if (inferredLang && primary.size === 1 && !primary.has(primaryOf(inferredLang.value))) notes.push(`declared language ${[...primary][0]} but the text reads as ${String(inferredLang.value)} (inferred)`);
   const licenses = fields.filter((f) => f.category === C.rights && f.field === "license" && f.status !== "inferred");
   if (new Set(licenses.map((f) => String(f.value).toLowerCase().replace(/[^a-z0-9.]/g, ""))).size > 1) flag("rights.license", licenses);
   const registry = fields.find((f) => f.field === "registryTitle" && f.status === "contradicted");

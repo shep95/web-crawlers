@@ -93,3 +93,68 @@ Legend: ● found · ○ applicable but not present in this fixture · `·` not 
 | 39 | Privacy & sensitivity | Verified (offline fixtures) | HTML (rich), JSON Schema, OpenAPI, Data Package, Model config.json, CSV, RSS feed, Sitemap, DataCite XML, Model card (MD), CITATION.cff, security.txt, Email (.eml), PDF | PII values are never returned — only counts and masked forms. |
 | 40 | Retention & disposition | Verified (offline fixtures) | HTML (rich), security.txt | Phrase detection over page text; statements are quoted, not interpreted. |
 | 41 | Authenticity & integrity | Verified (offline fixtures) | HTML (rich), JSON Schema, OpenAPI, Data Package, Model config.json, CSV, RSS feed, Sitemap, DataCite XML, Model card (MD), CITATION.cff, security.txt, Email (.eml), JPEG + EXIF, WAV audio, MP4 video, PDF, DOCX | A matching checksum proves consistency with the published digest, not that the source is trustworthy. |
+
+<!-- hand-written sections below are preserved by npm run coverage:matrix -->
+
+## Text intelligence (`src/text/`, extractor `text-intel`)
+
+Text is analysed at every level: document → paragraph → sentence → word → grapheme cluster → code point → byte. The four units are kept separate: **UTF-8 bytes**, **UTF-16 code units** (JavaScript string indexes), **Unicode code points**, and **extended grapheme clusters** (what a reader sees as one character). For example, 👩‍💻 is 1 grapheme, 3 code points (U+1F469 U+200D U+1F4BB), 5 UTF-16 units and 11 UTF-8 bytes. None of these units is a keystroke.
+
+Sources: JavaScript Unicode property escapes (`\p{gc=…}`, `\p{Script=…}`, `\p{Default_Ignorable_Code_Point}`, `\p{Bidi_Control}`, `\p{Extended_Pictographic}` …), `String.prototype.normalize`, and `Intl.Segmenter` (UAX #29 plus ICU dictionaries, so Chinese, Japanese, Thai, Khmer, Lao and Burmese split into words without spaces). Language identification uses the npm package `eld` (extrasmall n-gram database, loaded lazily on first use, ISO 639-1 → BCP 47 primary tags). Results depend on the runtime's Unicode/ICU version. Node 22 implements Unicode 16, where for example क्ष is one grapheme (GB9c conjunct rule).
+
+### What is stored and what is computed on demand
+
+| Stored per resource (observations, bounded) | Category | Field |
+|---|---|---|
+| Decoded charset, byte order mark, U+FFFD and control-character counts | 4 Technical | `textEncoding` |
+| Normalization form (NFC / NFD / none) and NFC/NFD/NFKC/NFKD flags | 4 Technical | `unicodeNormalization` |
+| Grapheme, code point, sentence and paragraph counts; `wordCount` now uses Intl.Segmenter | 2 Structural | `graphemeCount`, `codePointCount`, `sentenceCount`, `paragraphCount` |
+| Inferred language with status `detected` / `uncertain` / `undetermined` (`und`); `language` is added only when detected, and always with status/evidence type `inferred` | 1 Descriptive | `detectedLanguage`, `language` |
+| Scripts present (ISO 15924 code, letter share) | 1 Descriptive | `scripts` |
+| Invisible/format characters: count, suspicious count, by kind, first 20 with positions and curated names | 41 Integrity | `invisibleCharacters` |
+| Bidi controls: count, by role, embeddings/overrides/isolates left open at the end of a line ("Trojan Source"), first 20 positions | 41 Integrity | `bidiControls` |
+| Mixed-script and whole-word homoglyph words (first 20) | 41 Integrity | `confusableWords`, `textSpoofingRisk` (inferred) |
+| Credential patterns: count, type, confidence and location, never the value (masked, restricted) | 39 Privacy | `secretsDetected`, `credentialExposureWarning` (inferred) |
+
+Summaries cover the first 200,000 UTF-16 units of the analysed text (HTML body text, PDF text layer, or the decoded body for text formats). Positions are relative to that text, not to the file bytes. No per-character rows are stored. Character-level detail is computed on demand by the endpoints below. Secrets are replaced by `[REDACTED:<type>]` in the title, description, metadata text and body excerpt **before** they are written to the full-text index (SQLite `corpus_fts`, Postgres `corpus_docs`), and are redacted again when the text is read back.
+
+An inferred language never marks a declared one as `contradicted`. If they disagree, a quality note is added instead.
+
+### Endpoints
+
+`GET /api/v2/text/occurrences?q=<string>&resource=<id>[&limit=1..500]` returns the exact occurrences in one resource's stored text. Without `resource`, it searches across the index: full-text search on the query's words picks candidate resources (`candidates`, default 50, max 200), and their stored title, description and body excerpt are scanned. If the query has no searchable words (a lone mark, symbol or invisible character) or full-text search finds nothing, only the most recently indexed resources are scanned, and the response says so (`scope.strategy: "recent-scan"`). Matching is exact: UTF-16-identical, case-sensitive and non-overlapping. Canonically equivalent forms are not merged, and `graphemeAligned: false` marks a match that sits inside a larger grapheme cluster.
+
+```json
+{ "query": { "q": "é", "length": { "utf16": 1, "codePoints": 1, "graphemes": 1, "utf8Bytes": 2 },
+    "grapheme": { "codePoints": [{ "codePoint": "U+00E9", "utf8": "C3 A9", "category": "Ll", "categoryName": "Lowercase_Letter", "script": "Latin", "normalization": { "NFD": "U+0065 U+0301", "NFKD": "U+0065 U+0301" } }] } },
+  "scope": { "strategy": "resource", "resource": 1, "candidatesScanned": 1 },
+  "total": 1, "returned": 1, "truncated": false,
+  "occurrences": [{ "resourceId": 1, "url": "https://texts.example.org/notice-1.txt", "field": "body",
+    "line": 2, "column": 8, "graphemeColumn": 8, "utf8Offset": 28, "codePointOffset": 28, "utf16Offset": 28, "graphemeOffset": 28,
+    "length": { "utf16": 1, "codePoints": 1, "graphemes": 1, "utf8Bytes": 2 }, "graphemeAligned": true,
+    "context": { "before": "Line one says hello.\nThe caf", "match": "é", "after": " serves 日本語 tea 👩‍💻 daily.\n" } }],
+  "offsetBasis": { "relativeTo": "stored text excerpt", "description": "… not offsets into the original file bytes …",
+    "excerpts": [{ "resourceId": 1, "field": "body", "utf16Length": 58, "codePoints": 56, "utf8Bytes": 71, "capped": false }] },
+  "limits": { "identity": "Text cannot reveal who typed it …", "…": "…" } }
+```
+
+`GET /api/v2/text/analyze?text=…[&lang=<BCP 47>]` (also `POST` with JSON `{text, lang}`) analyses up to 2,000 code points; longer text returns `400 TEXT_TOO_LONG`. For each code point it returns U+ code, UTF-8 bytes, UTF-16 units, general category, script, case mapping and approximate case folding, decimal digit value, combining-mark flag, emoji properties, the normalization forms that differ, default-ignorable/bidi/join flags, and curated names for invisible and bidi characters. Each code point also carries its grapheme index, byte/code-point/UTF-16 offsets, line and column. The response also includes graphemes (emoji and ZWJ sequences), words, sentences and paragraphs with start positions, counts, scripts, inferred language, normalization, invisible and bidi findings, confusables and redacted secrets.
+
+```json
+{ "counts": { "utf16": 6, "codePoints": 6, "graphemes": 6, "utf8Bytes": 8, "words": 2 },
+  "language": { "tag": "und", "status": "undetermined", "reason": "too short to identify (5 letters; needs ≥ 12)" },
+  "characters": [{ "index": 0, "utf16Offset": 0, "utf8Offset": 0, "graphemeIndex": 0, "line": 1, "column": 1, "char": "h", "codePoint": "U+0068", "utf8": "68", "category": "Ll", "script": "Latin" }, "…"],
+  "invisible": { "count": 1, "suspicious": 1, "first": [{ "codePoint": "U+200B", "name": "ZERO WIDTH SPACE", "utf16Offset": 3, "utf8Offset": 3, "line": 1, "column": 4 }] },
+  "offsetBasis": { "relativeTo": "submitted text" }, "limits": { "…": "…" } }
+```
+
+### Limits (also returned in every response as `limits`)
+
+- **Identity:** text cannot reveal who typed it, on which device, from where, or which keys were pressed. That kind of data exists only as separate, consented records kept by the application a person typed into, and this crawler never collects it.
+- **Offsets** are relative to the stored text excerpt (≤ 100,000 UTF-16 units; whitespace-collapsed for web pages and PDFs; secrets redacted), not to the original file bytes. Original encoding offsets are not retained.
+- **Character names** are given only for the curated invisible, format and bidi characters. Node ships no name database, so other names are omitted rather than guessed. Numeric values are given only for decimal digits (Nd); values such as ½ are omitted.
+- **Case folding** is approximated with toUpperCase→toLowerCase (Cherokee folds to uppercase). It is not the CaseFolding.txt table.
+- **Confusables** use a curated Latin/Cyrillic/Greek subset of UTS #39 plus per-word mixed-script checks. They are a signal, not proof of intent. Mixed Japanese Han/Kana and Korean Han/Hangul words are allowed.
+- **Language detection** is statistical. Short text is `und` or `uncertain`, and the scores are eld's n-gram scores, not probabilities.
+- **Secret detection** is pattern-based, covering private-key blocks, AWS key ids and secret keys, JWTs, bearer tokens, GitHub/Slack/Google/Stripe/`sk-` keys, URL credentials, and `password=`-style assignments (low confidence). Unknown formats are missed. Likely placeholders are still redacted.
+- **Cross-index search** scans only the candidates that full-text search ranks. Postgres ranks only the first 20,000 characters of each body, and the SQLite tokenizer treats unspaced CJK runs as single tokens, so CJK candidates may be missed. Use `resource=` for a guaranteed scan of one resource.
