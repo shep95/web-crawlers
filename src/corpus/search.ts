@@ -2,6 +2,7 @@ import { CATEGORIES, CATEGORY_BY_ID, categoryApplies } from "../metadata/categor
 import type { MetadataField, ResourceKind } from "../metadata/types.js";
 import type { Corpus, LinkedResource, SearchCandidate } from "./types.js";
 import { isExcludedHost } from "./host-policy.js";
+import { deriveGeography } from "../geo/derive.js";
 
 const STOP = new Set("a an and are as at be by can do does for from has have how i in is it its me my of on or show that the their there these this to was what when where which who why will with find list about any all get tell give please".split(" "));
 
@@ -221,6 +222,7 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
     const gaps = intentCats
       .map((c) => ({ category: c, name: CATEGORY_BY_ID.get(c)!.name, state: observed.has(c) ? "observed" : !categoryApplies(c, (r.kind as ResourceKind) ?? "binary") ? "not_applicable" : coverage.find((x) => x.id === c)?.state ?? "not_found_after_inspection" }))
       .filter((g) => g.state !== "observed");
+    const facts = factSheet(all, supporting);
     results.push({
       resourceId: r.id,
       url: r.url,
@@ -239,7 +241,9 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
       categoriesObserved: [...observed].sort((a, b) => a - b),
       thumbnail: thumbnailFor(r, all),
       icon: iconFor(all),
-      facts: factSheet(all, supporting),
+      facts,
+      // Hosting (ccTLD hint), publisher and subject countries, each with its own evidence — never merged.
+      geography: deriveGeography({ host: r.host, title: r.title, description: r.description, facts }),
       evidence: evidenceFields.map((f) => ({ category: f.category, categoryName: CATEGORY_BY_ID.get(f.category)!.name, field: f.field, value: f.value, original: f.original, status: f.status, evidenceType: f.evidenceType, scope: f.scope, method: f.method, extractor: f.extractor, evidence: f.evidence, observedAt: f.observedAt })),
       gaps,
       supportingResources: supportingLinks,

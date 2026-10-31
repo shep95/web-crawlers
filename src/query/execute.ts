@@ -1,16 +1,21 @@
 /**
  * Search planning and checking: runs a QueryPlan against the index, checks every result against each requirement
- * (publisher, dates, type, language, exclusions, topic), revises the search when too few results qualify,
+ * (publisher, subject country, dates, type, language, exclusions, topic), revises the search when too few results qualify,
  * and reports what was satisfied, what is unknown and what was rejected — with the evidence for each check.
  */
 import type { Corpus } from "../corpus/types.js";
 import { searchCorpus, type CorpusSearchOptions } from "../corpus/search.js";
 import type { QueryPlan } from "./understand.js";
+import { deriveGeography, type ResultGeography } from "../geo/derive.js";
+import { placeName } from "../geo/registry.js";
 
 type Verdict = "pass" | "fail" | "unknown";
 export interface Check { requirement: string; strength: "hard" | "soft"; verdict: Verdict; evidence: string }
 type Result = Awaited<ReturnType<typeof searchCorpus>>["results"][number];
-export type CheckedResult = Result & { checks: Check[]; qualifies: boolean; planScore: number; foundBy: string };
+export type CheckedResult = Result & { checks: Check[]; qualifies: boolean; planScore: number; foundBy: string; geography: ResultGeography };
+
+/** The result's three geographies (hosting / publisher / subject), from the search result or derived from its metadata. */
+export const geographyOf = (r: Result): ResultGeography => (r as { geography?: ResultGeography }).geography ?? deriveGeography(r);
 
 const factText = (list: Array<{ value: unknown }> | undefined) => (list ?? []).map((f) => (typeof f.value === "string" ? f.value : JSON.stringify(f.value))).join(" ");
 const hostMatches = (host: string, suffixes: string[]) => suffixes.some((s) => host === s || host.endsWith("." + s));
@@ -32,22 +37,30 @@ export function checkResult(r: Result, plan: QueryPlan): Check[] {
   const checks: Check[] = [];
   const host = r.host ?? "";
   const title = (r.title ?? "").toLowerCase();
+  const geo = geographyOf(r);
   if (c.publisher) {
     const pub = factText(r.facts?.publisher);
     const words = c.publisher.category === "government" ? GOVERNMENT_WORDS : c.publisher.category === "academic" ? ACADEMIC_WORDS : null;
-    const countryOk = !c.geography || new RegExp(`\\b${c.geography.country}\\b|\\b${c.geography.code}\\b`, "i").test(pub);
-    const label = `${c.publisher.mode === "published_by" ? "Published by" : "Associated with"} ${c.publisher.organization ?? `${c.geography ? c.geography.country + " " : ""}${c.publisher.category}`}`;
+    // The publisher's country is checked against the publisher geography only — never the subject or the ccTLD.
+    const countryOk = !c.publisher.country || geo.publisher.cc === c.publisher.country;
+    const label = `${c.publisher.mode === "published_by" ? "Published by" : "Associated with"} ${c.publisher.organization ?? `${c.publisher.country ? placeName(c.publisher.country) + " " : ""}${c.publisher.category}`}`;
     let verdict: Verdict, evidence: string;
     if (c.publisher.hostSuffixes.length && hostMatches(host, c.publisher.hostSuffixes)) (verdict = "pass"), (evidence = `served from ${host}`);
-    else if (pub && words?.test(pub) && countryOk) (verdict = "pass"), (evidence = `page names its publisher: ${pub.slice(0, 120)}`);
-    else if (c.publisher.hostSuffixes.length) (verdict = "fail"), (evidence = `served from ${host || "an unknown site"}${pub ? `; publisher stated as ${pub.slice(0, 80)}` : ""}`);
+    else if (pub && (words ? words.test(pub) : !!c.publisher.organization && pub.toLowerCase().includes(c.publisher.organization.toLowerCase())) && countryOk) (verdict = "pass"), (evidence = `page names its publisher: ${pub.slice(0, 120)}${c.publisher.country ? ` (publisher country ${geo.publisher.cc}: ${geo.publisher.evidence})` : ""}`);
+    else if (c.publisher.hostSuffixes.length) (verdict = "fail"), (evidence = `served from ${host || "an unknown site"}${pub ? `; publisher stated as ${pub.slice(0, 80)}` : ""}${c.publisher.country && geo.publisher.cc && geo.publisher.cc !== c.publisher.country ? `; publisher country is ${geo.publisher.cc}` : ""}`);
     else (verdict = "unknown"), (evidence = pub ? `publisher stated as ${pub.slice(0, 80)}` : "no publisher recorded");
     checks.push({ requirement: label, strength: c.publisher.strength, verdict, evidence });
-  } else if (c.geography) {
-    const place = `${factText(r.facts?.spatialCoverage)} ${factText(r.facts?.publisher)} ${title} ${r.snippet ?? ""}`;
-    const country = COUNTRY_TLD[c.geography.code];
-    const verdict: Verdict = new RegExp(`\\b${c.geography.country}\\b`, "i").test(place) || (country && host.endsWith(country)) ? "pass" : "unknown";
-    checks.push({ requirement: `Related to ${c.geography.country}`, strength: "soft", verdict, evidence: verdict === "pass" ? "named on the page or served from the country's domain" : "no mention found in the recorded metadata" });
+  }
+  const role = c.geography ? c.geography.role ?? (c.publisher ? "publisher" : "subject") : null;
+  if (c.geography && role === "subject") {
+    // "Documents about Japan": the subject geography (title, description, spatial coverage) — not where the site is or who runs it.
+    const want = new Set([c.geography.code, ...(c.geography.candidates ?? [])]);
+    const hit = geo.subject.find((s) => want.has(s.cc));
+    const others = geo.subject.filter((s) => !want.has(s.cc)).map((s) => s.cc);
+    const evidence = hit
+      ? `${hit.evidence}${hit.uncertain ? ` (uncertain: ${hit.uncertain})` : ""}`
+      : `${others.length ? `names ${others.join(", ")} but not ${c.geography.code}` : "no country named in the title, description or spatial coverage"}${geo.hosting.cc === c.geography.code ? `; served under a ${c.geography.code} ccTLD, which is not evidence of the subject` : ""}`;
+    checks.push({ requirement: `Subject country: ${c.geography.country}`, strength: c.geography.strength, verdict: hit ? "pass" : "unknown", evidence });
   }
   if (c.dates) {
     const ys = years(r);
@@ -81,8 +94,6 @@ export function checkResult(r: Result, plan: QueryPlan): Check[] {
   return checks;
 }
 
-const COUNTRY_TLD: Record<string, string> = { IN: ".in", GB: ".uk", CA: ".ca", AU: ".au", NZ: ".nz", IE: ".ie", SG: ".sg", CN: ".cn", JP: ".jp", KR: ".kr", DE: ".de", FR: ".fr", ES: ".es", IT: ".it", EU: ".eu", BR: ".br", MX: ".mx", ZA: ".za", NG: ".ng", KE: ".ke", PK: ".pk", BD: ".bd", ID: ".id", MY: ".my", PH: ".ph", IL: ".il", AE: ".ae", SA: ".sa" };
-
 function score(r: Result, checks: Check[]): number {
   let s = Math.log1p(Math.max(0, (r as { score?: number }).score ?? 0)) + 1;
   for (const c of checks) {
@@ -108,8 +119,9 @@ export async function askCorpus(store: Corpus, plan: QueryPlan, opts: AskOptions
   const take = (rows: Result[], foundBy: string) => {
     for (const r of rows) {
       if (seen.has(r.resourceId)) continue;
-      const checks = checkResult(r, plan);
-      seen.set(r.resourceId, { ...r, checks, qualifies: !checks.some((k) => k.strength === "hard" && k.verdict === "fail"), planScore: score(r, checks), foundBy });
+      const geography = geographyOf(r);
+      const checks = checkResult({ ...r, geography } as Result, plan);
+      seen.set(r.resourceId, { ...r, geography, checks, qualifies: !checks.some((k) => k.strength === "hard" && k.verdict === "fail"), planScore: score(r, checks), foundBy });
     }
   };
   const qualifying = () => [...seen.values()].filter((r) => r.qualifies);
