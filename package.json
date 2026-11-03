@@ -76,7 +76,6 @@
     "embedded-postgres": "^17.5.0-beta.15",
     "i18n-iso-countries": "^7.14.0",
     "iso-3166": "^4.4.0",
-    "iso-639-3": "^3.0.1",
     "hyparquet-writer": "^0.18.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
