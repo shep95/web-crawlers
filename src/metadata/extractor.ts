@@ -2,6 +2,7 @@ import type { CheerioAPI } from "cheerio";
 import type { SafeResponse } from "../net/safe-fetch.js";
 import type { EvidenceType, FieldStatus, MetadataField, Relationship, RelationshipType, ResourceKind, Scope, Sensitivity } from "./types.js";
 import { CATEGORY_BY_ID } from "./categories.js";
+import type { FormatDetection } from "./formats.js";
 
 /** Everything an extractor may read. Extractors never fetch except via `ctx.fetchAux`. */
 export interface ExtractionInput {
@@ -9,6 +10,9 @@ export interface ExtractionInput {
   response: Pick<SafeResponse, "status" | "headers" | "body" | "truncated" | "finalUrl" | "requestedUrl" | "redirects" | "remoteAddress" | "timings" | "encodedBytes" | "egress">;
   kind: ResourceKind;
   sniffedType: string;
+  /** Signature-first format detection (formats.ts). */
+  format: string;
+  detection: FormatDetection;
   sourceType: "url" | "upload";
   filename?: string | null;
   /** Network-enabled helpers (disabled for uploads / when options.network is false). */
@@ -41,7 +45,13 @@ export interface AddOptions {
 }
 
 /** Extractors that read embedded properties straight out of file structures. */
-const EMBEDDED = new Set(["image", "media-container", "pdf", "office", "email", "archive"]);
+const EMBEDDED = new Set(["image", "media-container", "pdf", "office", "email", "archive", "web-archive", "subtitles", "stream-manifest", "scientific", "parquet", "sqlite-header", "geo", "epub", "ebml", "data-lines", "config", "package-manifest", "source-code"]);
+
+/** Does this extractor apply to a resource of `kind` detected as `format`? */
+export function extractorApplies(e: Pick<Extractor, "kinds" | "formats">, kind: ResourceKind, format: string): boolean {
+  if (e.formats) return e.formats.includes(format);
+  return e.kinds === "all" || e.kinds.includes(kind);
+}
 
 function defaultEvidence(extractor: string, status: FieldStatus): EvidenceType {
   if (status === "inferred") return "inferred";
@@ -56,6 +66,11 @@ export interface Extractor {
   description: string;
   /** Resource kinds this extractor runs on ("all" = every resource). */
   kinds: ResourceKind[] | "all";
+  /**
+   * When set, the extractor runs only for these detected format ids (formats.ts),
+   * whatever the coarse kind is. Takes precedence over `kinds`.
+   */
+  formats?: string[];
   categories: number[];
   /** Requires outbound network access (DNS, TLS, archive, APIs). */
   needsNetwork?: boolean;

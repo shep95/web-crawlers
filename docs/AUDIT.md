@@ -72,9 +72,21 @@ Statuses: **Verified complete** (implemented and tested) · **Implemented, unver
 | Bootstrap sources against live public APIs | Implemented; live results visible only via Railway logs/heartbeat | sandbox egress blocks those hosts |
 | Railway multi-service (Postgres + api + crawler) | See deployment notes in the final report | — |
 | Cryptographic verification of PDF/DKIM/OOXML signatures | Not implemented (presence detected only) | — |
+| Format capability registry + signature-first detection (`src/metadata/formats.ts`) | Verified complete | `tests/formats.test.ts` (registry integrity, PDF-named-.jpg, unknown binary) |
+| Archives: tar / tar.gz / gzip / zip nested enumeration (depth, entries, bytes, time limits), zip-slip rejection, ratio guard, encryption → unavailable; 7z/RAR/bzip2/xz/zstd signature-only | Verified complete | `tests/formats.test.ts` "archives" + crawler child-resource test |
+| WARC / ARC record inventory | Verified complete | `tests/formats.test.ts` "web archives" |
+| Audio (MP3/ID3, WAV, AIFF; FLAC/OGG/Opus/M4A via music-metadata) | Verified for MP3/WAV/AIFF; others implemented, fixture-untested | `tests/formats.test.ts` "audio" |
+| WebM/MKV EBML, HLS, DASH, VTT/SRT/TTML | Verified complete | `tests/formats.test.ts` |
+| NetCDF classic, FITS, Parquet, SQLite (byte parser), HDF5 signature-only, GeoJSON/KML/KMZ/GPX | Verified complete | `tests/formats.test.ts` |
+| EPUB, JSONL, YAML, TOML, OpenAPI-YAML, robots.txt, package manifests, source code | Verified complete | `tests/formats.test.ts` |
+| OCR language routing (15 bundled Tesseract models, `ocr_model_unavailable` for uncovered scripts) | Verified complete | `tests/ocr-render.test.ts` |
+| Diversity-first discovery rotation (all ccTLDs, gTLDs, languages, MIME families; per-run coverage events) | Verified complete (CC index mocked at the HTTP boundary) | `tests/discovery-rotation.test.ts` |
+| Host-policy vs discovery sources: excluded-host sources disabled with an event | Verified complete | `tests/discovery-rotation.test.ts` |
 
 ## 6. Known limitations
 
 * Capacity is horizontal (API replicas, crawler replicas, Postgres read replicas, CDN); claims about specific user counts require load tests at that scale.
 * Cross-source claim reconciliation exists for DOIs (Crossref corroboration) only.
-* OCR is English-only by default.
+* OCR covers 15 bundled Tesseract models (eng, fra, spa, deu, por, rus, ell, ara, heb, hin, ben, tha, chi_sim, jpn, kor), routed by declared/hinted language; other scripts (e.g. Ethiopic, Georgian, Tamil, Traditional Chinese) report `ocr_model_unavailable`. Without any language hint the Latin `eng` model is used and the routing records `none_declared`. No script auto-detection (OSD) before OCR.
+* No speech recognition (ASR): audio/video transcripts are not produced; only embedded/declared subtitles are read.
+* Not parsed (signature only): 7z, RAR, bzip2, xz, zstd, HDF5/NetCDF-4, NetCDF CDF5, ZIP64; encrypted archive entries are never decrypted.

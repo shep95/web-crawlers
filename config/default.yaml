@@ -36,11 +36,13 @@ discovery:
   sitemap: true
   robots: true
   link_extraction: true
-  global_seeds:
-    - "https://www.wikipedia.org/"
-    - "https://www.reddit.com/"
-    - "https://news.ycombinator.com/"
-  cc_tld_seeds: false
+  # No fixed global seed list: a handful of US/English sites must not be the source of truth
+  # (and Wikimedia hosts are excluded by host policy anyway). Breadth comes from the
+  # diversity-first rotation over every ccTLD / gTLD / language / MIME family
+  # (src/corpus/rotation.ts), driving the Common Crawl index source.
+  global_seeds: []
+  # Rotating country-code TLD sampling (Common Crawl index). Set false to disable rotation.
+  cc_tld_seeds: true
 
 archive:
   enabled: true

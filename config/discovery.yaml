@@ -11,9 +11,18 @@ seeds:
   - { id: schemaorg, url: "https://schema.org/docs/full.html", type: page, interval_hours: 168, priority: 40 }
 
 # Common Crawl index sampling for standalone files (no webpage required).
+# Diversity-first rotation (src/corpus/rotation.ts): each run issues `pairs_per_run`
+# bounded queries (25 records each) for the next rotation slots — all 248 IANA ccTLDs
+# interleaved by continent, every other IANA TLD, every national language (filtered via
+# Common Crawl's ISO 639-3 `languages` field), and every parser-backed MIME family from
+# the format registry. `per_host` caps items per host per run. Optional `domains` are
+# operator pins that take turns with rotation slots; leave `mimes` unset to rotate MIME
+# families from the registry. Per-run coverage is recorded as `discovery_rotation` events.
 commoncrawl:
-  domains: [noaa.gov, nasa.gov, usgs.gov, imd.gov.in, data.gov.in, europa.eu, ac.uk, edu.au, who.int, worldbank.org, un.org, gov.uk]
-  mimes: [application/pdf, text/csv, image/jpeg, video/mp4, application/json, application/zip, audio/mpeg]
+  rotation: true
+  pairs_per_run: 4
+  per_host: 6
+  domains: []
 
 # Public storage listings (S3/GCS XML/JSON, autoindex pages) are followed automatically
 # whenever the crawler encounters them; operators may also seed known public listings here.

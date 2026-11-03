@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as cheerio from "cheerio";
 import { CATEGORIES, CATEGORY_BY_ID, C, categoryApplies, type FieldType } from "./categories.js";
-import { FieldCollector, type ExtractionContext, type ExtractionInput, type Extractor } from "./extractor.js";
+import { FieldCollector, extractorApplies, type ExtractionContext, type ExtractionInput, type Extractor } from "./extractor.js";
+import { detectFormat, FORMAT_BY_ID, formatCategories } from "./formats.js";
 import { parseJsonLdBlocks } from "./jsonld.js";
 import { decodeBody, sniffKind } from "./normalize.js";
 import { EXTRACTORS } from "./extractors/index.js";
@@ -133,7 +134,7 @@ export async function analyzeUrl(rawUrl: string, opts: AnalyzeOptions = {}): Pro
     });
     if (robots.sitemaps.length) record.fields.push({ category: C.discovery, field: "sitemaps", value: robots.sitemaps, status: "source_declared", method: "robots.txt Sitemap:", extractor: `pipeline@${PIPELINE_VERSION}`, sensitivity: "public", evidenceType: "source_claim", scope: "site", observedAt: record.fetchedAt });
     if (robots.crawlDelay) record.fields.push({ category: C.discovery, field: "crawlDelay", value: robots.crawlDelay, status: "source_declared", method: "robots.txt Crawl-delay", extractor: `pipeline@${PIPELINE_VERSION}`, sensitivity: "public", evidenceType: "source_claim", scope: "site", observedAt: record.fetchedAt });
-    record.categories = coverage(record.fields, record.kind, record.processing.extractors, record.httpStatus);
+    record.categories = coverage(record.fields, record.kind, record.processing.extractors, record.httpStatus, record.format?.id);
     cache.set(key, record);
     return filterCategories(record, opts);
   });
@@ -178,9 +179,10 @@ export async function analyzeResponse(
   const started = Date.now();
   const observedAt = new Date().toISOString();
   const declared = response.headers["content-type"]?.split(";")[0].trim().toLowerCase() ?? null;
-  const { kind, sniffed } = sniffKind(response.body, declared, opts.filename ?? response.finalUrl);
+  const detection = detectFormat(response.body, declared, opts.filename ?? response.finalUrl);
+  const { kind, mime: sniffed, format } = detection;
   const collector = new FieldCollector(observedAt);
-  const input: ExtractionInput = { url: response.finalUrl, response, kind, sniffedType: sniffed, sourceType: opts.sourceType, filename: opts.filename, network: opts.enrich };
+  const input: ExtractionInput = { url: response.finalUrl, response, kind, sniffedType: sniffed, format, detection, sourceType: opts.sourceType, filename: opts.filename, network: opts.enrich };
 
   let textCache: Promise<string> | null = null;
   let domCache: Promise<cheerio.CheerioAPI> | null = null;
@@ -203,7 +205,7 @@ export async function analyzeResponse(
   const all = opts.extractors ?? EXTRACTORS;
   // Error responses (404/5xx...) carry an error page, not the resource: only transport-level extractors run.
   const errorPage = opts.sourceType === "url" && response.status >= 400;
-  const applicable = all.filter((e) => (e.kinds === "all" || e.kinds.includes(kind)) && (!e.needsNetwork || opts.enrich) && (!errorPage || e.kinds === "all"));
+  const applicable = all.filter((e) => extractorApplies(e, kind, format) && (!e.needsNetwork || opts.enrich) && (!errorPage || e.kinds === "all"));
 
   const exec = async (ex: Extractor) => {
     const tag = `${ex.id}@${ex.version}`;
@@ -238,6 +240,19 @@ export async function analyzeResponse(
   opts.onShared?.(shared);
   const charset = shared.get("charset") as string | undefined;
   if (charset) collector.add(`pipeline@${PIPELINE_VERSION}`, C.technical, "decodedCharset", charset, { status: "observed", method: "charset detection" });
+  collector.add(`pipeline@${PIPELINE_VERSION}`, C.technical, "formatDetection", {
+    format: detection.format,
+    mime: detection.mime,
+    method: detection.method,
+    signature: detection.signature,
+    extension: detection.extension,
+    extensionSuggests: detection.extensionSuggests,
+    extensionAgrees: detection.extensionAgrees,
+    declaredMime: detection.declaredMime,
+    declaredAgrees: detection.declaredAgrees,
+    support: detection.support,
+    ...(detection.detail ? { detail: detection.detail } : {}),
+  }, { status: "observed", method: "signature-first format detection (formats.ts)", evidence: detection.signature ? `matched ${detection.signature}` : `decided by ${detection.method}` });
   const ldErrors = shared.get("jsonld.errors") as number | undefined;
 
   const fields = collector.fields;
@@ -250,6 +265,10 @@ export async function analyzeResponse(
     }
   }
   const quality = assessQuality(fields, kind, runs, collector.duplicates, response, declared, sniffed, ldErrors ?? 0);
+  if (detection.extensionAgrees === false && detection.method !== "extension") {
+    quality.notes.push(`file extension .${detection.extension} suggests ${detection.extensionSuggests.join("/")} but the bytes are ${detection.format} (${detection.signature ?? detection.method})`);
+    quality.extensionMismatch = { extension: detection.extension!, suggests: detection.extensionSuggests, detected: detection.format };
+  }
   addQualityFields(fields, quality, observedAt);
 
   const pick = (cat: number, names: string[]) => {
@@ -269,6 +288,7 @@ export async function analyzeResponse(
     sourceType: opts.sourceType,
     kind,
     mimeType: declared ?? sniffed,
+    format: { id: format, mime: sniffed, method: detection.method, support: FORMAT_BY_ID.get(format)?.status ?? "unsupported" },
     title: pick(C.descriptive, ["title", "headline"]) ?? pick(C.document, ["title"]) ?? (opts.filename ?? null),
     description: pick(C.descriptive, ["description"]),
     fetchedAt: response.timings.startedAt,
@@ -287,7 +307,7 @@ export async function analyzeResponse(
       cache: "miss",
     },
   };
-  record.categories = coverage(fields, kind, runs, record.httpStatus);
+  record.categories = coverage(fields, kind, runs, record.httpStatus, format);
   return record;
 }
 
@@ -408,25 +428,46 @@ export function coverage(
   kind: ResourceKind,
   runs: ResourceRecord["processing"]["extractors"],
   httpStatus: number | null,
+  formatId?: string,
 ): CategoryCoverage[] {
   const counts = new Map<number, number>();
-  for (const f of fields) counts.set(f.category, (counts.get(f.category) ?? 0) + 1);
+  const usable = new Map<number, number>();
+  const unavailableOnly = new Map<number, string>();
+  for (const f of fields) {
+    counts.set(f.category, (counts.get(f.category) ?? 0) + 1);
+    if (f.status !== "extraction_failed" && f.status !== "unavailable") usable.set(f.category, (usable.get(f.category) ?? 0) + 1);
+    if (f.status === "unavailable") unavailableOnly.set(f.category, typeof f.value === "string" ? f.value : JSON.stringify(f.value).slice(0, 160));
+  }
   const failedExtractors = new Set(runs.filter((r) => r.error).map((r) => r.id.split("@")[0]));
   const denied = httpStatus === 401 || httpStatus === 403 || httpStatus === 407;
+  const fmt = formatId ? FORMAT_BY_ID.get(formatId) : undefined;
+  const fmtCats = new Set(formatCategories(formatId));
+  // A parser reported that it could not read the content (encrypted, no parser, no model).
+  const parseStatus = fields.find((f) => f.field === "parseStatus" && f.status === "unavailable");
+  const opaque = fmt && (fmt.status === "signature_only" || fmt.status === "unsupported");
   return CATEGORIES.map((def) => {
     const n = counts.get(def.id) ?? 0;
-    const applies = categoryApplies(def.id, kind);
+    const applies = categoryApplies(def.id, kind) || fmtCats.has(def.id);
     let state: CategoryCoverage["state"];
     let note: string | undefined;
-    if (n > 0) state = "observed";
+    if (n > 0 && (usable.get(def.id) ?? 0) === 0) {
+      // Only failure/unavailability markers here: say so instead of claiming an observation.
+      state = unavailableOnly.has(def.id) ? "unavailable" : "extraction_failed";
+      note = unavailableOnly.get(def.id) ?? "only extraction errors were recorded";
+    } else if (n > 0) state = "observed";
     else if (!applies) state = "not_applicable";
     else if (denied) state = "unavailable";
     else if (httpStatus !== null && httpStatus >= 400) {
       state = "extraction_failed";
       note = `HTTP ${httpStatus}`;
-    }
-    else {
-      const responsible = EXTRACTORS.filter((e) => e.categories.includes(def.id) && (e.kinds === "all" || e.kinds.includes(kind))).map((e) => e.id);
+    } else if (opaque && def.id !== C.descriptive && categoryApplies(def.id, kind)) {
+      state = "unavailable";
+      note = `${fmt!.label}: ${fmt!.status === "signature_only" ? "format recognised by signature; no parser is bundled" : "format deliberately not parsed"}`;
+    } else if (parseStatus && fmtCats.has(def.id)) {
+      state = "unavailable";
+      note = String((parseStatus.value as { reason?: string })?.reason ?? parseStatus.value).slice(0, 200);
+    } else {
+      const responsible = EXTRACTORS.filter((e) => e.categories.includes(def.id) && extractorApplies(e, kind, formatId ?? "")).map((e) => e.id);
       if (responsible.length && responsible.every((id) => failedExtractors.has(id))) {
         state = "extraction_failed";
         note = `failed: ${responsible.join(", ")}`;

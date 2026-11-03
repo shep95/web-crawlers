@@ -26,6 +26,8 @@ export type FieldStatus =
   | "corroborated"
   | "inferred"
   | "contradicted"
+  /** The value exists in principle but this system cannot read it (no parser, encrypted, no model). */
+  | "unavailable"
   | "extraction_failed";
 
 export type Sensitivity = "public" | "personal" | "restricted";
@@ -115,7 +117,19 @@ export interface QualityReport {
   duplicatesCollapsed: number;
   bodyTruncated: boolean;
   declaredVsSniffedType?: { declared: string | null; sniffed: string };
+  /** File extension pointed at a different format than the bytes (e.g. a PDF named .jpg). */
+  extensionMismatch?: { extension: string; suggests: string[]; detected: string };
   notes: string[];
+}
+
+export interface FormatDetectionSummary {
+  /** Format id from the registry in formats.ts (e.g. "warc", "geojson", "unknown_binary"). */
+  id: string;
+  mime: string;
+  /** How the format was decided: "signature" (magic bytes), "structure" (parsed content), "extension", "declared_mime", "text_heuristic", "fallback". */
+  method: string;
+  /** Parser support for this format: implemented | partial | signature_only | unsupported. */
+  support: string;
 }
 
 export interface ResourceRecord {
@@ -126,6 +140,8 @@ export interface ResourceRecord {
   sourceType: "url" | "upload";
   kind: ResourceKind;
   mimeType: string | null;
+  /** Format detected by signature-first sniffing (see ../metadata/formats.ts). */
+  format?: FormatDetectionSummary;
   title: string | null;
   description: string | null;
   fetchedAt: string;

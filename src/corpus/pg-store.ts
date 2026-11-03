@@ -3,8 +3,11 @@ import { isExcludedUrl } from "./host-policy.js";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import type { MetadataField, ResourceRecord } from "../metadata/types.js";
-import { metaText, recordBlob, rowToField, toPattern, valueText } from "./store.js";
-import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord, type StoredText } from "./types.js";
+import { LIFECYCLE_COLUMNS, coverageRows, metaText, recordBlob, rowToField, toPattern, valueText } from "./store.js";
+import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord, type StoredText, type TransitionRow } from "./types.js";
+import { IllegalTransitionError, LEGACY_LIFECYCLE_SQL, LEGACY_REASON_SQL, LIFECYCLE_EXPR, assertTransition, canTransition, type LifecycleState } from "./lifecycle.js";
+import { facetsFromSnapshots, type ResourceFacets } from "./facets.js";
+import { PG_DIALECT, collectCoverage, type CoverageRaw } from "./coverage.js";
 import { redactForIndex, redactSecrets } from "../text/secrets.js";
 
 /**
@@ -106,6 +109,21 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
 );
 CREATE INDEX IF NOT EXISTS idx_docs_tsv ON corpus_docs USING GIN (tsv);
 ALTER TABLE corpus_docs ADD COLUMN IF NOT EXISTS rank_tsv tsvector;
+${LIFECYCLE_COLUMNS.map(([c, def]) => `ALTER TABLE resources ADD COLUMN IF NOT EXISTS ${c} ${def};`).join("\n")}
+CREATE INDEX IF NOT EXISTS idx_res_lifecycle ON resources (lifecycle);
+CREATE INDEX IF NOT EXISTS idx_res_lifecycle_pending ON resources (id) WHERE lifecycle IS NULL;
+CREATE INDEX IF NOT EXISTS idx_res_facets_pending ON resources (id) WHERE facets_at IS NULL AND snapshot_count > 0;
+CREATE TABLE IF NOT EXISTS transitions (id BIGSERIAL PRIMARY KEY, resource_id BIGINT NOT NULL, ts TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL, reason TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS idx_transitions_res ON transitions (resource_id, id);
+CREATE INDEX IF NOT EXISTS idx_transitions_ts ON transitions (ts);
+CREATE TABLE IF NOT EXISTS resource_coverage (
+  resource_id BIGINT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  category SMALLINT NOT NULL, state TEXT NOT NULL, fields INTEGER NOT NULL DEFAULT 0,
+  observed INTEGER NOT NULL DEFAULT 0, source_declared INTEGER NOT NULL DEFAULT 0, corroborated INTEGER NOT NULL DEFAULT 0,
+  inferred INTEGER NOT NULL DEFAULT 0, contradicted INTEGER NOT NULL DEFAULT 0, extraction_failed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (resource_id, category)
+);
+CREATE INDEX IF NOT EXISTS idx_rescov_cat ON resource_coverage (category, state);
 `;
 
 // Ranking reads a compact vector (title, description, URL, first 1,500 characters) instead of the full-text one:
@@ -153,12 +171,15 @@ export class PgCorpus implements Corpus {
         await client.query(`CREATE TABLE IF NOT EXISTS data_migrations (id TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)`);
         const fresh = await client.query(`INSERT INTO data_migrations (id, applied_at) VALUES ('content-text-v1', $1) ON CONFLICT (id) DO NOTHING RETURNING id`, [Date.now()]);
         if (fresh.rowCount) await client.query(`UPDATE resources SET due_at = $1 + (id % 1440) * 60000 WHERE state = 'indexed' AND kind = 'webpage' AND duplicate_of IS NULL`, [Date.now()]);
+        // "lifecycle-v1": columns are added above; existing rows get their lifecycle from the legacy state in
+        // background batches (backfill), and every query reads COALESCE(lifecycle, <legacy mapping>) meanwhile.
+        await client.query(`INSERT INTO data_migrations (id, applied_at) VALUES ('lifecycle-v1', $1) ON CONFLICT (id) DO NOTHING`, [Date.now()]);
       } finally {
         await client.query("SELECT pg_advisory_unlock(424242)").catch(() => undefined);
         client.release();
       }
     }
-    if (opts.migrate !== false) void c.backfillRankVectors();
+    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.backfill());
     return c;
   }
 
@@ -193,7 +214,12 @@ export class PgCorpus implements Corpus {
   }
 
   async recoverLeases(now: number): Promise<number> {
-    const r = await this.q(`UPDATE resources SET state='queued', lease_until=NULL WHERE state='leased' AND (lease_until IS NULL OR lease_until < $1)`, [now]);
+    const r = await this.q(
+      `WITH old AS (SELECT id, ${LIFECYCLE_EXPR} AS lc FROM resources WHERE state='leased' AND (lease_until IS NULL OR lease_until < $1) FOR UPDATE SKIP LOCKED),
+       upd AS (UPDATE resources r SET state='queued', lease_until=NULL, lifecycle='scheduled', lifecycle_at=$2, lifecycle_reason='lease_expired' FROM old WHERE r.id = old.id RETURNING r.id, old.lc)
+       INSERT INTO transitions (resource_id, ts, from_state, to_state, reason) SELECT id, $2, lc, 'scheduled', 'lease_expired' FROM upd`,
+      [now, new Date(Math.min(now, Date.now())).toISOString()],
+    );
     await this.q(`UPDATE hosts SET leased_until = 0 WHERE leased_until > 0 AND leased_until < $1`, [now]);
     if (r.rowCount) await this.event(null, "lease_recovery", `${r.rowCount} abandoned lease(s) returned to the queue`);
     return r.rowCount ?? 0;
@@ -205,8 +231,8 @@ export class PgCorpus implements Corpus {
     const ts = new Date(now).toISOString();
     const uniq = [...new Map(items.map((i) => [i.url, i])).values()];
     const res = await this.q<{ id: string; url: string; inserted: boolean }>(
-      `INSERT INTO resources (url, url_hash, host, state, priority, depth, via, purpose, parent_id, due_at, discovered_at)
-       SELECT x.url, x.hash, x.host, 'queued', x.priority, x.depth, x.via, x.purpose, x.parent_id, $2, $3
+      `INSERT INTO resources (url, url_hash, host, state, priority, depth, via, purpose, parent_id, due_at, discovered_at, lifecycle, lifecycle_at, lifecycle_reason)
+       SELECT x.url, x.hash, x.host, 'queued', x.priority, x.depth, x.via, x.purpose, x.parent_id, $2, $3, 'discovered', $3, x.via
        FROM json_to_recordset($1::json) AS x(url text, hash text, host text, priority real, depth int, via text, purpose text, parent_id bigint)
        ON CONFLICT (url) DO UPDATE SET priority = GREATEST(resources.priority, EXCLUDED.priority)
        RETURNING id, url, (xmax = 0) AS inserted`,
@@ -215,6 +241,11 @@ export class PgCorpus implements Corpus {
     const ids = new Map(res.rows.map((r) => [r.url, Number(r.id)]));
     const added = res.rows.filter((r) => r.inserted);
     if (added.length) {
+      const byUrl = new Map(uniq.map((i) => [i.url, i]));
+      await this.q(
+        `INSERT INTO transitions (resource_id, ts, from_state, to_state, reason, detail) SELECT id, $2, NULL, 'discovered', reason, detail FROM json_to_recordset($1::json) AS x(id bigint, reason text, detail text)`,
+        [JSON.stringify(added.map((r) => { const it = byUrl.get(r.url)!; return { id: Number(r.id), reason: it.via, detail: it.parentId ? `referenced by #${it.parentId}${it.relation ? ` (${it.relation})` : ""}` : null }; })), ts],
+      );
       const perHost = new Map<string, number>();
       for (const r of added) perHost.set(new URL(r.url).hostname, (perHost.get(new URL(r.url).hostname) ?? 0) + 1);
       await this.q(
@@ -271,7 +302,17 @@ export class PgCorpus implements Corpus {
       // Atomic host claim: exactly one worker (in any replica) wins this host.
       const claim = await this.q(`UPDATE hosts SET leased_until = $2 WHERE host = $1 AND leased_until <= $3 RETURNING host`, [host, now + leaseMs, now]);
       if (!claim.rowCount) continue;
-      const got = await this.q(`UPDATE resources SET state='leased', lease_until=$2, attempts=attempts+1 WHERE id=$1 AND state IN ('queued','indexed','unavailable') RETURNING *`, [c.id, now + leaseMs]);
+      const ts = new Date().toISOString();
+      const got = await this.q(
+        `WITH prev AS (SELECT id, state AS previous_state, ${LIFECYCLE_EXPR} AS prev_lc FROM resources WHERE id = $1 FOR UPDATE)
+         UPDATE resources r SET state='leased', lease_until=$2, attempts=r.attempts+1, lifecycle='leased', lifecycle_at=$3,
+           lifecycle_reason = CASE WHEN prev.previous_state = 'queued' THEN 'new' ELSE 'revisit' END
+         FROM prev WHERE r.id = prev.id AND r.state IN ('queued','indexed','unavailable')
+           AND prev.prev_lc IN (${(["discovered", "scheduled", "indexed", "superseded", "restricted", "skipped", "unavailable", "failed_retryable", "permanently_failed"] as const).filter((s) => canTransition(s, "leased")).map((s) => `'${s}'`).join(",")})
+         RETURNING r.*, prev.previous_state, prev.prev_lc`,
+        [c.id, now + leaseMs, ts],
+      );
+      if (got.rowCount) await this.q(`INSERT INTO transitions (resource_id, ts, from_state, to_state, reason) VALUES ($1, $2, $3, 'leased', $4)`, [c.id, ts, got.rows[0].prev_lc, got.rows[0].lifecycle_reason]);
       if (!got.rowCount) {
         await this.q(`UPDATE hosts SET leased_until = 0 WHERE host = $1`, [host]);
         continue;
@@ -317,6 +358,96 @@ export class PgCorpus implements Corpus {
   async finish(id: number, state: ResourceState, dueAt: number, patch: Partial<Omit<ResourceRow, "id">> = {}): Promise<void> {
     await this.setStage(id, { ...patch, state, due_at: dueAt, lease_until: null });
     await this.q(`UPDATE hosts SET leased_until = 0 WHERE host = (SELECT host FROM resources WHERE id = $1)`, [id]);
+  }
+
+  async transition(id: number, from: LifecycleState, path: LifecycleState | LifecycleState[], reason: string | null = null, detail: string | null = null, patch: Partial<Omit<ResourceRow, "id">> = {}): Promise<LifecycleState> {
+    const steps = typeof path === "string" ? [path] : path;
+    const to = assertTransition(from, steps, id);
+    const ts = new Date().toISOString();
+    const keys = Object.keys(patch).filter((k) => /^[a-z_]+$/.test(k) && !k.startsWith("lifecycle"));
+    // Compare-and-set + stage columns + history in one statement: nothing is recorded unless the row was really in `from`.
+    const r = await this.q(
+      `WITH upd AS (UPDATE resources SET ${keys.map((k, i) => `${k} = $${i + 8}, `).join("")}lifecycle = $3, lifecycle_at = $4, lifecycle_reason = $5 WHERE id = $1 AND ${LIFECYCLE_EXPR} = $2 RETURNING id)
+       INSERT INTO transitions (resource_id, ts, from_state, to_state, reason, detail)
+       SELECT upd.id, $4, s.from_state, s.to_state, $5, $6 FROM upd, json_to_recordset($7::json) AS s(from_state text, to_state text, ord int) ORDER BY s.ord
+       RETURNING id`,
+      [id, from, to, ts, reason, detail?.slice(0, 500).replace(/\u0000/g, "") ?? null, JSON.stringify(steps.map((s, i) => ({ from_state: i ? steps[i - 1] : from, to_state: s, ord: i }))), ...keys.map((k) => (patch as Record<string, unknown>)[k])],
+    );
+    if (!r.rowCount) {
+      const cur = (await this.q<{ lc: string }>(`SELECT ${LIFECYCLE_EXPR} AS lc FROM resources WHERE id = $1`, [id])).rows[0];
+      throw new IllegalTransitionError(cur?.lc ?? null, steps[0], id, cur ? `row is in ${cur.lc}, expected ${from}` : "no such resource");
+    }
+    return to;
+  }
+
+  async transitionsFor(resourceId: number, limit = 100): Promise<TransitionRow[]> {
+    return (await this.q(`SELECT ts, from_state, to_state, reason, detail FROM transitions WHERE resource_id = $1 ORDER BY id DESC LIMIT $2`, [resourceId, limit])).rows
+      .map((r) => ({ ts: String(r.ts), from: (r.from_state as string) ?? null, to: r.to_state as LifecycleState, reason: (r.reason as string) ?? null, detail: (r.detail as string) ?? null }));
+  }
+
+  async setFacets(resourceId: number, facets: ResourceFacets, at: string): Promise<void> {
+    await this.writeFacets(resourceId, facets, at, false);
+  }
+
+  private async writeFacets(resourceId: number, facets: ResourceFacets, at: string, onlyIfUnmeasured: boolean): Promise<void> {
+    const rows = coverageRows(facets).map((c) => ({ c: c.category, s: c.state, f: c.fields, o: c.byStatus.observed, sd: c.byStatus.source_declared, co: c.byStatus.corroborated, i: c.byStatus.inferred, ct: c.byStatus.contradicted, x: c.byStatus.extraction_failed }));
+    await this.q(
+      `WITH upd AS (UPDATE resources SET language = $2, published_at = $3, categories_observed = $4, mime = COALESCE($5, mime), facets_at = $6 WHERE id = $1${onlyIfUnmeasured ? " AND facets_at IS NULL" : ""} RETURNING id)
+       INSERT INTO resource_coverage (resource_id, category, state, fields, observed, source_declared, corroborated, inferred, contradicted, extraction_failed)
+       SELECT upd.id, x.c, x.s, x.f, x.o, x.sd, x.co, x.i, x.ct, x.x FROM upd, json_to_recordset($7::json) AS x(c smallint, s text, f int, o int, sd int, co int, i int, ct int, x int)
+       ON CONFLICT (resource_id, category) DO UPDATE SET state = EXCLUDED.state, fields = EXCLUDED.fields, observed = EXCLUDED.observed, source_declared = EXCLUDED.source_declared,
+         corroborated = EXCLUDED.corroborated, inferred = EXCLUDED.inferred, contradicted = EXCLUDED.contradicted, extraction_failed = EXCLUDED.extraction_failed`,
+      [resourceId, facets.language, facets.published_at, facets.categories_observed, facets.mime, at, JSON.stringify(rows)],
+    );
+    // Categories that dropped out (now not_applicable / no fields) since the previous round.
+    if (!onlyIfUnmeasured) await this.q(`DELETE FROM resource_coverage WHERE resource_id = $1 AND NOT (category = ANY($2::smallint[]))`, [resourceId, rows.map((r) => r.c)]);
+  }
+
+  async coverageRaw(now: number): Promise<CoverageRaw> {
+    return collectCoverage(async (sql) => (await this.q(sql)).rows, PG_DIALECT, this.backend, now);
+  }
+
+  async liveCategoryEvidence() {
+    return (await this.q(`SELECT r.kind AS kind, c.category AS category, COUNT(*) AS resources FROM resource_coverage c JOIN resources r ON r.id = c.resource_id
+      WHERE c.state = 'observed' AND r.kind IS NOT NULL GROUP BY r.kind, c.category`)).rows.map((r) => ({ kind: String(r.kind), category: Number(r.category), resources: Number(r.resources) }));
+  }
+
+  /** Background, batched, multi-replica safe (SKIP LOCKED): lifecycle from legacy state, then facets from stored observations. */
+  async backfill(opts: { batch?: number; maxBatches?: number } = {}): Promise<{ lifecycle: number; facets: number }> {
+    const batch = opts.batch ?? 500;
+    let lifecycle = 0;
+    let facets = 0;
+    try {
+      for (let i = 0; i < (opts.maxBatches ?? Infinity); i++) {
+        const ts = new Date().toISOString();
+        const r = await this.q(
+          `WITH b AS (SELECT id FROM resources WHERE lifecycle IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED),
+           upd AS (UPDATE resources r SET lifecycle = ${LEGACY_LIFECYCLE_SQL.replace(/\b(state|attempts|last_error|duplicate_of|http_status)\b/g, "r.$1")}, lifecycle_reason = ${LEGACY_REASON_SQL.replace(/\b(state|attempts|last_error|duplicate_of|http_status)\b/g, "r.$1")},
+             lifecycle_at = COALESCE(r.indexed_at, r.retrieved_at, r.discovered_at) FROM b WHERE r.id = b.id RETURNING r.id, r.state, r.lifecycle, r.lifecycle_reason)
+           INSERT INTO transitions (resource_id, ts, from_state, to_state, reason, detail) SELECT id, $2, 'legacy:' || state, lifecycle, 'migration:lifecycle-v1', lifecycle_reason FROM upd`,
+          [batch, ts],
+        );
+        lifecycle += r.rowCount ?? 0;
+        if (!r.rowCount) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      let after = 0;
+      for (let i = 0; i < (opts.maxBatches ?? Infinity); i++) {
+        const rows = (await this.q(`SELECT r.id, s.id AS sid, s.fetched_at, s.mime, s.http_status FROM resources r
+            JOIN LATERAL (SELECT id, fetched_at, mime, http_status FROM snapshots WHERE resource_id = r.id ORDER BY id DESC LIMIT 1) s ON TRUE
+            WHERE r.facets_at IS NULL AND r.snapshot_count > 0 AND r.state <> 'leased' AND r.id > $2 ORDER BY r.id LIMIT $1`, [Math.min(batch, 200), after])).rows
+          .map((x) => ({ id: Number(x.id), sid: Number(x.sid), fetched_at: String(x.fetched_at), mime: (x.mime as string) ?? null, http_status: x.http_status === null ? null : Number(x.http_status) }));
+        if (!rows.length) break;
+        after = rows[rows.length - 1].id;
+        for (const f of await facetsFromSnapshots(this, rows)) await this.writeFacets(f.id, f.facets, new Date().toISOString(), true);
+        facets += rows.length;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (lifecycle || facets) await this.event(null, "lifecycle_backfill", `${lifecycle} lifecycle rows, ${facets} facet rows`);
+    } catch (err) {
+      await this.event(null, "lifecycle_backfill_failed", (err as Error).message.slice(0, 200)).catch(() => undefined);
+    }
+    return { lifecycle, facets };
   }
 
   async latestSnapshot(resourceId: number) {
@@ -388,6 +519,7 @@ export class PgCorpus implements Corpus {
   }
 
   async pruneEvents(now: number): Promise<number> {
+    await this.q(`DELETE FROM transitions WHERE ts < $1`, [new Date(now - SYSTEM_RETENTION.transitionsDays * 86400_000).toISOString()]);
     return (await this.q(`DELETE FROM events WHERE ts < $1`, [new Date(now - SYSTEM_RETENTION.eventsDays * 86400_000).toISOString()])).rowCount ?? 0;
   }
 
@@ -410,6 +542,7 @@ export class PgCorpus implements Corpus {
       backend: this.backend,
       resources: await one(`SELECT COUNT(*) n FROM resources`),
       byState: (await group(`SELECT state k, COUNT(*) n FROM resources GROUP BY state`)) as Record<string, number>,
+      byLifecycle: await group(`SELECT ${LIFECYCLE_EXPR} k, COUNT(*) n FROM resources GROUP BY 1`),
       byKind: await group(`SELECT kind k, COUNT(*) n FROM resources WHERE kind IS NOT NULL GROUP BY kind`),
       byPurpose: await group(`SELECT purpose k, COUNT(*) n FROM resources GROUP BY purpose`),
       hosts: await one(`SELECT COUNT(*) n FROM hosts`),

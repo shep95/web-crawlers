@@ -182,3 +182,228 @@ Query plans mark `constraints.geography.role`: "documents about India" is checke
 **API.** `GET /api/v2/geography` — registry metadata, provenance, caveats, counts (by type, UN status, region; non-ISO by kind; subdivisions), the 249 entries in compact form (code, name, type, unStatus, region, tlds, languages) and the non-ISO layer; `?q=` searches every name, endonym, translation and demonym in any script. `GET /api/v2/geography/:code` — one entry by alpha-2, alpha-3 or numeric code (with its ISO 3166-2 subdivisions), a non-ISO code (XK, EU, UK, EL — aliases include the ISO entry they stand for) or an ISO 3166-2 code (`US-GA`). Both are public (no API key) like `/api/v2/categories`.
 
 **Limitations.** Free-text matching is deterministic name matching: names in other languages are used only when distinctive (Latin-script translations shorter than 5 letters and a list of English false friends such as "island" are ignored), unspaced scripts (Chinese, Japanese, Thai) are matched by substring, and subdivision names (e.g. US states) are not used to find places except as ambiguity notes ("georgia"). Region words ("Europe", "Africa") are not countries and are not read as the EU. Domain suffixes and a few relationships are curated, not package data; XK's .xk TLD is as listed by `world-countries` and is not a delegated TLD.
+
+## Item state machine (lifecycle)
+
+Every resource carries two states:
+
+* `state` — the **scheduling** state kept for API and data compatibility (`queued`, `leased`, `indexed`, `unavailable`, `skipped`, `failed`). It decides what the frontier may lease and what search may return.
+* `lifecycle` — the **processing** state. It changes only through guarded transitions (`src/corpus/lifecycle.ts`), and each step is written with a timestamp, a reason code and a detail to the `transitions` table (`GET /api/v2/resources/:id` → `lifecycle.transitions`). Source-level and content-level outcomes are separate states: an HTTP 200 is `fetched`, not `indexed`, and a link seen on a page is `discovered`, not crawled.
+
+```
+ discovered ─┐                       ┌──────────────► restricted        robots.txt / 401 / 403 / 407 / 451
+ scheduled ──┼─► leased ─► fetched ──┼─► change_detected ─► unavailable  404 / 410 / other 4xx (revisit 7 d)
+ (resting) ──┘     │          │      └─► inspected ─► [change_detected] ─► extracted ─► validated ─┬─► indexed
+                   │          │                                                                  └─► superseded (duplicate_of)
+                   │          └─► indexed | superseded                    304 Not Modified
+                   ├─► skipped                                            egress / SSRF policy (private IP, credentials in URL …)
+                   └─► failed_retryable ──(due)──► leased …               network, timeout, 408/425/429/5xx
+                         └─(retries exhausted)─► permanently_failed
+ any in-flight state ──(lease expired / worker died)──► scheduled
+```
+
+| State | Meaning | Emitted in |
+|---|---|---|
+| discovered | reference admitted to the frontier, never retrieved | `enqueue` (both stores) |
+| scheduled | put back in the frontier on purpose: an abandoned lease was recovered | `recoverLeases` |
+| leased | a worker holds the item (reason `new` / `revisit`) | `lease` |
+| fetched | a transport response arrived (any status; detail has status, bytes, truncation, redirects) | `crawler.process` after fetch |
+| inspected | bytes were sniffed and the format extractors ran over real content (not an error page) | after `analyzeResponse` |
+| change_detected | a revisit saw different content (`content_changed`), a removal (`removed`, 200 → 404/410), a restriction (`access_restricted`) or a recovery (`restored`) | before extraction / before unavailable |
+| extracted | field observations, including the crawler's own, were assembled (credentials redacted) | before validation |
+| validated | the record was checked; issue codes go to `validation_issues` and the `validationIssues` field (category 20) | `validateRecord` |
+| indexed | searchable | after the snapshot is saved |
+| superseded | identical bytes to another resource (`duplicate_of`); not indexed separately | duplicate detection |
+| restricted | the source restricts access; never bypassed | robots check, 401/403/407/451 |
+| skipped | this system's policy declined it | egress / SSRF guard |
+| unavailable | the source answered that it is not there | 404 / 410 / other 4xx |
+| failed_retryable | transient failure; retried with backoff | 5xx / 429 / network / timeout |
+| permanently_failed | retries exhausted, or a deterministic failure (redirect loop, invalid URL) | retry policy |
+
+Illegal transitions (for example `discovered → indexed`, `fetched → extracted`, `unavailable → indexed`) throw `IllegalTransitionError`. Writes are compare-and-set: a transition is applied only if the row is still in the expected state, so a stale worker cannot overwrite a newer outcome. Tests: `tests/lifecycle.test.ts`.
+
+**Retry policy.** Retryable: network errors, timeouts, HTTP 408/425/429/5xx. Backoff is 15 min × 2^(n−1), capped at 6 h. When the server sends a longer `Retry-After`, that wins (capped at 24 h). After `CRAWL_MAX_ATTEMPTS` (default 3) consecutive failures the item becomes `permanently_failed`: HTTP failures keep scheduling state `unavailable` (revisited in 7 d), other errors become `failed`. A revisit that fails transiently stays searchable with its last good snapshot while it waits. `404`/`410`/other 4xx go to `unavailable` with no retry. Restrictions and policy refusals are never retried early.
+
+**Migration `lifecycle-v1`** (recorded in `data_migrations`) adds the columns `lifecycle`, `lifecycle_at`, `lifecycle_reason`, `failures`, `mime`, `language`, `published_at`, `categories_observed`, `facets_at` and `validation_issues`, plus the tables `transitions` and `resource_coverage`, with their indexes. Old rows get a lifecycle mapped from their legacy state, plus one transition `legacy:<state> → <lifecycle>`:
+* `queued` → discovered (or failed_retryable after a failed attempt)
+* `indexed` with `duplicate_of` → superseded
+* `unavailable` with 401/403 → restricted; with 5xx → permanently_failed
+* `skipped` because of robots → restricted
+
+SQLite applies this mapping synchronously. Postgres runs it as a batched `SKIP LOCKED` background job. Until it finishes, every query reads `COALESCE(lifecycle, <mapping>)`. Coverage facets for old rows are rebuilt the same way, in the background, from their latest stored snapshot. Old state names stay valid in `state`.
+
+## Coverage API — `GET /api/v2/coverage`
+
+All values come from aggregate SQL over stored rows. Results are cached for 60 s per replica (`COVERAGE_CACHE_TTL_MS`) and computed by one request at a time.
+
+* **Counts** are always numbers, and `0` means a measured zero.
+* `"unknown"` means the value was not measured.
+* Averages and timestamps over an empty set are `null`.
+
+| Field | Meaning |
+|---|---|
+| `totals.discovered` | URLs known to the frontier (seen and admitted), whether or not they were fetched |
+| `fetched` | a transport response was received at least once (any HTTP status) |
+| `inspected` / `extracted` | real content (not an error page) went through the format extractors / fields were assembled |
+| `validated`, `validatedWithIssues` | records checked in their last round; issue counts are under `validationIssues` |
+| `indexed`, `superseded`, `restricted`, `skipped`, `unavailable`, `failedRetryable`, `permanentlyFailed`, `awaitingFirstFetch`, `scheduled`, `inFlight` | current lifecycle counts |
+| `failures[]` | `{state, reason, count}` for every non-success state, grouped by reason code (`robots_disallow`, `http_404`, `egress_policy:non_public_ip`, `duplicate_of:<id>` …) |
+| `uniqueContentHashes` | distinct SHA-256 of stored bodies (an upper bound when groups are summed; flagged `uniqueContentHashesIsUpperBound`) |
+| `standaloneFiles` | non-HTML resources that no web page links to (found via listings, archives, feeds, APIs) |
+| `archiveChildrenInspected` | archive entries that went through extraction |
+| `lastSuccessfulCrawlAt`, `lastFetchAt` | latest `indexed_at` / `retrieved_at` |
+| `newestObservedPublication` | newest Temporal.published value; dates more than a day after retrieval are ignored |
+| `avgFieldsPerResource`, `avgCategoriesObservedPerResource` | depth, over resources with measured facets |
+| `freshness` | hours since retrieval for indexed resources (average and maximum) |
+| `facetsMeasured` / `facetsUnmeasured` | resources whose language / category facets were measured vs fetched-but-unmeasured (processed before lifecycle-v1, not yet backfilled) |
+| `progressLast24h` | transitions per target state in the last 24 h |
+| `byCountry` | **hosting signal only** (ccTLD of the host, labelled `strength: "weak"`; generic-use ccTLDs such as .io/.co/.tv flagged). Each country has `hostingTld` metrics: 0 = no host with that ccTLD. `publisherCountry` and `subjectCountry` are `"unknown"`: they are never inferred from the TLD. IP literals, generic and supranational TLDs are reported separately under `nonCountryHosts`. |
+| `byLanguage` | primary subtag from Descriptive.language; `none_found` = inspected, none declared; `unmeasuredResources` = not measured |
+| `byKind`, `byMime` | per sniffed kind and declared/sniffed MIME |
+| `bySourceFamily` | per `via` prefix (`bootstrap`, `reference`, `sitemap`, `feed`, `archive_entry`, `search_api` …), with the top 25 `via` values inside |
+| `byCategory` | for each of the 41 categories: resources by category state (`observed`, `not_found_after_inspection`, `not_applicable`, `unavailable`, `extraction_failed`, `unknown`) and fields by status (`observed`, `source_declared`, `corroborated`, `inferred`, `contradicted`, `extraction_failed`) — latest round per resource |
+
+Example (abridged; values illustrative of the response shape):
+
+```json
+{ "generatedAt": "2026-10-31T08:00:00.000Z", "backend": "postgres",
+  "totals": { "discovered": 21, "fetched": 18, "inspected": 13, "indexed": 11, "superseded": 1, "restricted": 1, "skipped": 1,
+              "unavailable": 2, "failedRetryable": 0, "uniqueContentHashes": 16, "standaloneFiles": 0, "avgFieldsPerResource": 88.4,
+              "lastSuccessfulCrawlAt": "2026-10-30T09:02:00.000Z", "freshness": { "indexedResources": 11, "avgHoursSinceRetrieval": 0.7, "maxHoursSinceRetrieval": 1.1 } },
+  "failures": [ { "state": "restricted", "reason": "robots_disallow", "count": 1 }, { "state": "unavailable", "reason": "http_404", "count": 1 } ],
+  "byCountry": { "hostingSignal": { "method": "country-code top-level domain of the resource host", "strength": "weak" },
+                 "registry": { "source": "temporary: derived from ccTLDs observed in the corpus (src/geo registry not available)", "entries": 0 },
+                 "countries": [ { "code": "DE", "name": "Germany", "hostingTld": { "discovered": 0, "indexed": 0 }, "publisherCountry": "unknown", "subjectCountry": "unknown" } ] },
+  "byCategory": { "resourcesMeasured": 16, "resourcesUnknown": 0,
+                  "categories": [ { "id": 32, "key": "document", "resources": { "observed": 2, "not_applicable": 14, "extraction_failed": 0, "unknown": 0 },
+                                    "fields": { "observed": 9, "extraction_failed": 1 } } ] },
+  "cache": { "ttlSeconds": 60, "ageSeconds": 0 } }
+```
+
+**Performance.** One aggregate query per dimension over `resources` (no per-row work in JS), one `GROUP BY` over `resource_coverage` (at most 41 rows per resource; `not_applicable` rows are not stored but derived), and one anti-join for standalone files. All of them run in parallel. Measured on local Postgres 16 with 120 000 resources and 3 000 000 coverage rows: 1.1–1.3 s per full report, which is served from the 60 s cache.
+
+## Capability matrix — `GET /api/v2/capabilities`
+
+For each category and format (resource kind): `configured` (the category registry's `appliesTo`), `implemented` (a registered extractor declares that kind and category), `tested` (an offline fixture of that kind yields a real value), `liveVerified` (count of corpus resources of that kind with the category observed; 0 = measured zero), `blocked` (reasons the responsible extractors cannot run here, e.g. network enrichment off, DNS/TLS behind an egress proxy) and an overall `status` (`live_verified` > `tested` > `implemented` > `blocked` > `configured` > `unknown`).
+
+The `tested` claims (`OFFLINE_VERIFIED` in `src/corpus/capabilities.ts`) are checked against the fixtures in CI (`tests/lifecycle.test.ts`). If `src/metadata/formats.ts` exists, its entries (`id`, `mimes`, `status`, `categories`, `tested` …) are listed under `formats`. Without it, the matrix falls back to the extractor registry, and `sources.formatRegistry` says so.
+
+## Negative cases (tests/negative-cases.test.ts, both backends)
+
+| Case | Asserted outcome |
+|---|---|
+| robots.txt disallow | never fetched; `restricted` / `robots_disallow`; transitions `discovered → leased → restricted` |
+| redirect to a private IP | target never contacted; `skipped` / `egress_policy:non_public_ip`; no snapshot |
+| credentials in a page | redacted from fields, evidence, title/description and search text; secret tokens not findable; `credentialLikeStrings` (category 39, counts only, masked) |
+| PDF bytes served as `image/jpeg` | kind `pdf` by signature; `declared_type_mismatch` validation issue; parsed as a PDF |
+| huge payload | cut at the byte cap; `truncated: true` (category 20); `bodyBytes` = cap; `truncated` validation issue; row counts labelled sampled |
+| flaky 503, 503, 200 | `failed_retryable` ×2 with backoff, then `indexed`; failures reset; searchable |
+| permanent 404 | `unavailable` / `http_404`; fetched once; not inspected; normal revisit schedule |
+| duplicate mirrors | one `indexed`, the other `superseded` with `duplicate_of` |
+| corrupt PDF | `parseError` = `extraction_failed`; only byte-level measurements; no title/author/pageCount; never `corroborated` |
+| calendar / date-path traps | rejected at discovery (`calendar_trap`); never enqueued or fetched |
+| removal (200 then 410) | `fetched → change_detected (removed, "HTTP 200 → 410") → unavailable`; `removed` event; dropped from search |
+
+## Current limits
+
+* Hosting country comes from the TLD only, which is a weak signal. Publisher and subject country are `unknown` until the geography registry (`src/geo`) is wired in. Integration point: `loadCountryRegistry()` in `src/http/corpus-routes.ts` accepts any exported array of `{ code | alpha2, name }` with at least 100 entries, or the route option `countries`.
+* `validated` labels problems but does not reject records: a truthful partial record is still indexed, with its issues listed.
+* Facets for resources processed before lifecycle-v1 come from their latest stored snapshot by a background backfill. Until it runs they count as `unknown`.
+* `uniqueContentHashes` summed across groups (countries, source families) is an upper bound.
+* Transition history is pruned after `TRANSITION_RETENTION_DAYS` (default 90). The current lifecycle is never pruned.
+
+
+## Format capability registry (`src/metadata/formats.ts`)
+
+Machine-readable source of truth for which file formats the pipeline recognises and how far it reads them. Import it rather than parsing this table:
+
+```ts
+import { FORMATS, FORMAT_BY_ID, detectFormat } from "./src/metadata/formats.js";
+// FORMATS: Array<{
+//   id: string;              // stable format id, e.g. "warc", "geojson", "unknown_binary"
+//   label: string;
+//   family: string;          // web | document | data | image | audio | video | streaming | subtitle | archive | web_archive | scientific | geo | database | code | config | email | binary
+//   kind: ResourceKind;      // coarse kind used by kind-gated extractors
+//   mimes: string[];         // declared MIME hints (first = canonical)
+//   extensions: string[];    // extension hints
+//   signatures: string[];    // human-readable magic bytes / structural signature
+//   parser: string | null;   // extractor id(s) (first token is an extractor id in extractors/index.ts)
+//   status: "implemented" | "partial" | "signature_only" | "unsupported";
+//   categories: number[];    // ids of the 41 categories this format's extractor can fill
+//   tested: boolean;         // a vitest test exercises it with an in-test fixture
+//   notes?: string;
+// }>
+// detectFormat(body, declaredMime, nameOrUrl) → { format, kind, mime, method, signature, extension,
+//   extensionSuggests, extensionAgrees, declaredMime, declaredAgrees, support, detail? }
+```
+
+Detection is signature-first: magic bytes (and, for text formats, structure such as `WEBVTT`, `#EXTM3U`, `<MPD`, `"type":"FeatureCollection"`) decide; extension and declared MIME are recorded as hints and compared. Every record carries `technical.formatDetection` (observed) and `record.format = { id, mime, method, support }`; a disagreeing extension adds `quality.extensionMismatch` and a quality note (e.g. a PDF named `.jpg`).
+
+Coverage semantics added with the registry: a category listed in a format's `categories` is applicable to that resource even when the coarse kind would not make it so (e.g. Spatial for GPX, Video for an HLS manifest, Document for EPUB). For `signature_only` / `unsupported` formats, applicable-but-unread categories are `unavailable` with a note (never `not_found_after_inspection`). A `technical.parseStatus` field with status `unavailable` (encrypted zip entries, CDF5, no OCR model) marks the format's unobserved categories `unavailable`. Categories whose only fields are failure markers are `extraction_failed`, not `observed`.
+
+| id | label | family | kind | status | parser | categories | tested |
+|---|---|---|---|---|---|---|:-:|
+| `html` | HTML page | web | webpage | implemented | html | 1 descriptive, 2 structural, 6 rights, 8 provenance, 12 temporal, 13 spatial, 14 identifiers, 15 relational, 16 semantic, 25 discovery, 26 web_seo, 27 social_sharing, 38 accessibility, 39 privacy | ✓ |
+| `xml` | XML document | data | xml | implemented | xml | 16 semantic, 17 schema, 1 descriptive, 12 temporal, 2 structural, 14 identifiers, 6 rights, 13 spatial | ✓ |
+| `feed` | RSS/Atom feed | web | feed | implemented | xml | 1 descriptive, 2 structural, 12 temporal, 25 discovery, 22 operational, 10 audit | ✓ |
+| `json` | JSON document | data | json | implemented | json | 17 schema, 18 constraints, 16 semantic, 1 descriptive, 11 version, 2 structural | ✓ |
+| `csv` | CSV/TSV table | data | csv | implemented | csv | 17 schema, 2 structural, 19 statistical, 20 quality | ✓ |
+| `text` | Plain text / Markdown | document | text | implemented | text | 1 descriptive, 2 structural, 14 identifiers, 37 ai_ml, 36 scientific | ✓ |
+| `email` | Email message (RFC 5322) | email | email | implemented | email | 33 email, 12 temporal, 15 relational, 41 integrity, 39 privacy | ✓ |
+| `pdf` | PDF | document | pdf | implemented | pdf | 32 document, 1 descriptive, 4 technical, 12 temporal, 8 provenance, 5 preservation, 41 integrity, 7 access_security, 2 structural, 38 accessibility | ✓ |
+| `office` | OOXML / ODF office document | document | office | implemented | office | 32 document, 1 descriptive, 12 temporal, 8 provenance, 21 business, 11 version, 2 structural | ✓ |
+| `epub` | EPUB e-book | document | archive | implemented | epub | 32 document, 1 descriptive, 14 identifiers, 6 rights, 12 temporal, 2 structural, 8 provenance, 7 access_security | ✓ |
+| `jsonl` | JSON Lines / NDJSON | data | text | implemented | data-lines | 17 schema, 2 structural, 18 constraints, 20 quality | ✓ |
+| `yaml` | YAML | config | text | implemented | config | 2 structural, 17 schema, 1 descriptive, 11 version | ✓ |
+| `toml` | TOML | config | text | implemented | config | 2 structural, 17 schema | ✓ |
+| `openapi` | OpenAPI / Swagger spec | data | json | implemented | json | config | 17 schema, 1 descriptive, 11 version, 7 access_security, 6 rights, 2 structural | ✓ |
+| `robots_txt` | robots.txt | config | text | implemented | config | 25 discovery, 7 access_security, 2 structural | ✓ |
+| `package_json` | npm package.json | code | json | implemented | package-manifest | 1 descriptive, 11 version, 6 rights, 9 lineage, 8 provenance, 15 relational | ✓ |
+| `requirements_txt` | pip requirements.txt | code | text | implemented | package-manifest | 9 lineage, 2 structural | ✓ |
+| `pyproject` | Python pyproject.toml | code | text | implemented | package-manifest | 1 descriptive, 11 version, 6 rights, 9 lineage, 8 provenance | ✓ |
+| `cargo_toml` | Rust Cargo.toml | code | text | implemented | package-manifest | 1 descriptive, 11 version, 6 rights, 9 lineage, 8 provenance | ✓ |
+| `source_code` | Source code | code | text | implemented | source-code | 4 technical, 2 structural, 6 rights, 1 descriptive | ✓ |
+| `parquet` | Apache Parquet | data | binary | implemented | scientific (hyparquet) | 17 schema, 2 structural, 19 statistical, 4 technical, 8 provenance, 13 spatial | ✓ |
+| `sqlite` | SQLite database | database | binary | partial | scientific (byte parser) | 4 technical, 17 schema, 2 structural, 11 version | ✓ |
+| `jpeg` | JPEG image | image | image | implemented | image + ocr | 29 image, 4 technical, 1 descriptive, 6 rights, 12 temporal, 13 spatial, 35 device_sensor, 39 privacy | ✓ |
+| `png` | PNG image | image | image | implemented | image + ocr | 29 image, 4 technical | ✓ |
+| `gif` | GIF image | image | image | implemented | image | 29 image, 4 technical | – |
+| `webp` | WebP image | image | image | implemented | image | 29 image, 4 technical | – |
+| `tiff` | TIFF image | image | image | implemented | image | 29 image, 4 technical | – |
+| `heic` | HEIC/AVIF image | image | image | implemented | image | 29 image, 4 technical | – |
+| `mp3` | MP3 audio | audio | audio | implemented | media-container (music-metadata) | 30 audio, 4 technical, 1 descriptive, 14 identifiers, 6 rights, 12 temporal | ✓ |
+| `flac` | FLAC audio | audio | audio | implemented | media-container (music-metadata) | 30 audio, 4 technical, 1 descriptive, 41 integrity | ✓ |
+| `ogg` | Ogg Vorbis audio | audio | audio | implemented | media-container (music-metadata) | 30 audio, 4 technical, 1 descriptive | – |
+| `opus` | Ogg Opus audio | audio | audio | implemented | media-container (music-metadata) | 30 audio, 4 technical, 1 descriptive | – |
+| `wav` | WAV audio | audio | audio | implemented | media-container (music-metadata) | 30 audio, 4 technical | ✓ |
+| `aiff` | AIFF audio | audio | audio | implemented | media-container (music-metadata) | 30 audio, 4 technical | ✓ |
+| `m4a` | MPEG-4 audio (M4A) | audio | audio | implemented | isobmff + media-container | 30 audio, 4 technical, 1 descriptive | – |
+| `mp4` | MP4 video | video | video | implemented | isobmff | 31 video, 30 audio, 4 technical, 12 temporal, 2 structural, 38 accessibility | ✓ |
+| `mov` | QuickTime video | video | video | implemented | isobmff | 31 video, 30 audio, 4 technical, 12 temporal, 2 structural | – |
+| `webm` | WebM video | video | video | implemented | ebml | 31 video, 30 audio, 4 technical, 2 structural, 38 accessibility, 1 descriptive | ✓ |
+| `mkv` | Matroska video | video | video | implemented | ebml | 31 video, 30 audio, 4 technical, 2 structural, 38 accessibility, 1 descriptive | ✓ |
+| `hls` | HLS playlist (.m3u8) | streaming | text | implemented | stream-manifest | 31 video, 30 audio, 2 structural, 4 technical, 38 accessibility, 7 access_security, 1 descriptive | ✓ |
+| `dash` | MPEG-DASH manifest (.mpd) | streaming | xml | implemented | stream-manifest | 31 video, 30 audio, 2 structural, 4 technical, 38 accessibility, 7 access_security, 1 descriptive | ✓ |
+| `vtt` | WebVTT subtitles | subtitle | text | implemented | subtitles | 38 accessibility, 2 structural, 1 descriptive, 31 video | ✓ |
+| `srt` | SubRip subtitles | subtitle | text | implemented | subtitles | 38 accessibility, 2 structural, 31 video | ✓ |
+| `ttml` | TTML subtitles | subtitle | xml | implemented | subtitles | 38 accessibility, 2 structural, 1 descriptive, 31 video | ✓ |
+| `zip` | ZIP archive | archive | archive | implemented | archive | 2 structural, 28 file_system, 5 preservation, 41 integrity, 4 technical, 7 access_security | ✓ |
+| `tar` | TAR archive | archive | archive | implemented | archive | 2 structural, 28 file_system, 5 preservation, 41 integrity, 4 technical, 7 access_security | ✓ |
+| `tar_gz` | gzip-compressed TAR | archive | archive | implemented | archive | 2 structural, 28 file_system, 5 preservation, 41 integrity, 4 technical, 7 access_security | ✓ |
+| `gzip` | gzip (single file) | archive | archive | implemented | archive | 2 structural, 28 file_system, 4 technical | ✓ |
+| `7z` | 7-Zip archive | archive | archive | signature_only | — | 4 technical | ✓ |
+| `rar` | RAR archive | archive | archive | signature_only | — | 4 technical | ✓ |
+| `bzip2` | bzip2 stream | archive | archive | signature_only | — | 4 technical | – |
+| `xz` | xz stream | archive | archive | signature_only | — | 4 technical | ✓ |
+| `zstd` | Zstandard stream | archive | archive | signature_only | — | 4 technical | – |
+| `warc` | WARC web archive | web_archive | archive | implemented | web-archive | 2 structural, 5 preservation, 12 temporal, 8 provenance, 15 relational, 4 technical, 41 integrity | ✓ |
+| `arc` | ARC web archive (legacy) | web_archive | archive | implemented | web-archive | 2 structural, 5 preservation, 12 temporal | ✓ |
+| `netcdf` | NetCDF classic / 64-bit offset | scientific | binary | implemented | scientific (netcdfjs) | 17 schema, 16 semantic, 1 descriptive, 8 provenance, 9 lineage, 13 spatial, 12 temporal, 36 scientific, 2 structural, 6 rights | ✓ |
+| `hdf5` | HDF5 / NetCDF-4 | scientific | binary | signature_only | — | 4 technical | ✓ |
+| `fits` | FITS (astronomy) | scientific | binary | implemented | scientific | 36 scientific, 35 device_sensor, 12 temporal, 2 structural, 4 technical, 1 descriptive, 16 semantic | ✓ |
+| `geojson` | GeoJSON | geo | json | implemented | geo | 13 spatial, 2 structural, 17 schema | ✓ |
+| `kml` | KML | geo | xml | implemented | geo | 13 spatial, 2 structural, 1 descriptive, 12 temporal | ✓ |
+| `kmz` | KMZ (zipped KML) | geo | archive | implemented | geo + archive | 13 spatial, 2 structural, 1 descriptive, 12 temporal | ✓ |
+| `gpx` | GPX track | geo | xml | implemented | geo | 13 spatial, 12 temporal, 2 structural, 1 descriptive, 8 provenance, 35 device_sensor, 39 privacy | ✓ |
+| `executable` | Executable / native binary | binary | binary | unsupported | — | 4 technical | ✓ |
+| `unknown_binary` | Unidentified binary | binary | binary | unsupported | binary | 4 technical, 41 integrity, 28 file_system | ✓ |

@@ -3,6 +3,9 @@ import { inflateRawSync } from "node:zlib";
 export interface ZipEntryInfo {
   name: string;
   method: number;
+  /** General-purpose bit flag (bit 0 = encrypted, bit 6 = strong encryption). */
+  flags: number;
+  encrypted: boolean;
   compressedSize: number;
   uncompressedSize: number;
   localOffset: number;
@@ -20,6 +23,7 @@ export function listZipEntries(buf: Buffer, maxEntries = 5000): ZipEntryInfo[] {
   }
   if (eocd < 0) throw new Error("zip: end of central directory not found (truncated?)");
   const count = buf.readUInt16LE(eocd + 10);
+  if (count === 0xffff || buf.readUInt32LE(eocd + 16) === 0xffffffff) throw new Error("zip: ZIP64 archives are not supported");
   let p = buf.readUInt32LE(eocd + 16);
   const entries: ZipEntryInfo[] = [];
   for (let i = 0; i < Math.min(count, maxEntries); i++) {
@@ -27,7 +31,10 @@ export function listZipEntries(buf: Buffer, maxEntries = 5000): ZipEntryInfo[] {
     const nameLen = buf.readUInt16LE(p + 28);
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
+    const flags = buf.readUInt16LE(p + 8);
     entries.push({
+      flags,
+      encrypted: (flags & 0x1) !== 0 || (flags & 0x40) !== 0,
       method: buf.readUInt16LE(p + 10),
       compressedSize: buf.readUInt32LE(p + 20),
       uncompressedSize: buf.readUInt32LE(p + 24),
@@ -45,6 +52,7 @@ export function readZipEntry(buf: Buffer, entry: ZipEntryInfo, maxBytes: number)
   if (buf.readUInt32LE(p) !== 0x04034b50) throw new Error("zip: bad local header");
   const start = p + 30 + buf.readUInt16LE(p + 26) + buf.readUInt16LE(p + 28);
   const data = buf.subarray(start, start + entry.compressedSize);
+  if (entry.encrypted) throw new Error("zip: entry is encrypted (no credentials)");
   if (entry.method === 0) return data.subarray(0, maxBytes);
   if (entry.method !== 8) throw new Error(`zip: unsupported method ${entry.method}`);
   return inflateRawSync(data, { maxOutputLength: maxBytes });

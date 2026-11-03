@@ -27,7 +27,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 1, key: "descriptive", name: "Descriptive",
     definition: "What a resource is: title, description, creators, subjects, keywords, language.",
-    appliesTo: ALL, methods: ["html.meta", "json-ld", "dublin-core", "pdf.info", "ooxml.core", "id3/vorbis tags", "exif/iptc/xmp", "feed", "csv.header"],
+    appliesTo: ALL, methods: ["html.meta", "json-ld", "dublin-core", "pdf.info", "ooxml.core", "id3/vorbis tags", "exif/iptc/xmp", "feed", "csv.header", "epub opf dc:*", "netcdf global attributes", "package manifests", "subtitle/stream language declarations"],
     sensitivity: "public",
     fields: { title: "string", description: "string", author: "array", keywords: "array", language: "string", subject: "array", headline: "string", generator: "string" },
     limitations: "Summaries are source-declared descriptions only; no generative summarisation.",
@@ -35,7 +35,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 2, key: "structural", name: "Structural",
     definition: "How a resource is organised: headings, sections, tables, pages, tracks, parts.",
-    appliesTo: ALL, methods: ["html.dom", "pdf.pages", "ooxml.app", "media.tracks", "csv.shape", "json.shape", "feed.items"],
+    appliesTo: ALL, methods: ["html.dom", "pdf.pages", "ooxml.app", "media.tracks", "csv.shape", "json.shape", "feed.items", "archive listing (nested, bounded)", "warc records", "subtitle cues", "hls/dash variants", "geo features", "parquet row groups", "fits hdus", "jsonl records", "source line counts"],
     sensitivity: "public",
     fields: { headingOutline: "array", headingCount: "number", tableCount: "number", listCount: "number", wordCount: "number", pageCount: "number", landmarks: "array", trackCount: "number", rowCount: "number", columnCount: "number", itemCount: "number" },
     limitations: "PDF outlines (bookmarks) are not parsed; DOCX heading structure not parsed.",
@@ -51,7 +51,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 4, key: "technical", name: "Technical",
     definition: "Machine-readable properties: MIME type, encoding, format, codecs, resolution, compression.",
-    appliesTo: ALL, methods: ["http.headers", "magic-bytes", "image-size", "music-metadata", "pdf.header"],
+    appliesTo: ALL, methods: ["http.headers", "magic-bytes", "image-size", "music-metadata", "pdf.header", "signature-first format detection (formats.ts)", "ebml tracks", "sqlite header", "parquet codecs"],
     sensitivity: "public",
     fields: { mimeType: "string", sniffedType: "string", charset: "string", contentLength: "number", contentEncoding: "string", compressionRatio: "number", server: "string", httpStatus: "number", width: "number", height: "number", format: "string", codec: "string", bitrate: "number", sampleRate: "number", pdfVersion: "string" },
     limitations: "No transcoding/probing beyond container headers.",
@@ -59,7 +59,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 5, key: "preservation", name: "Preservation",
     definition: "Preservation history: archive captures, fixity values, preservation formats (e.g. PDF/A).",
-    appliesTo: ALL, methods: ["wayback-cdx", "sha256", "pdf.xmp pdfaid", "memento headers"],
+    appliesTo: ALL, methods: ["wayback-cdx", "sha256", "pdf.xmp pdfaid", "memento headers", "warc/arc packaging", "bagit manifests"],
     sensitivity: "public",
     fields: { sha256: "string", archiveFirstCapture: "date", archiveLastCapture: "date", archiveCaptureSample: "number", pdfaConformance: "string", mementoDatetime: "date" },
     limitations: "Wayback lookups depend on archive.org availability; capture count is a capped sample.",
@@ -67,7 +67,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 6, key: "rights", name: "Rights & licensing",
     definition: "Copyright notices, licences, attribution and reuse terms.",
-    appliesTo: ALL, methods: ["rel=license", "json-ld license", "cc-url detection", "copyright notice", "iptc/xmp rights", "model-card license", "spdx"],
+    appliesTo: ALL, methods: ["rel=license", "json-ld license", "cc-url detection", "copyright notice", "iptc/xmp rights", "model-card license", "spdx", "spdx header in source", "package manifest license", "epub dc:rights"],
     sensitivity: "public",
     fields: { license: "string", licenseUrl: "url", copyright: "string", rightsStatement: "string", copyrightHolder: "string" },
     limitations: "Detected licences are source-declared; no legal interpretation.",
@@ -75,7 +75,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 7, key: "access_security", name: "Access & security",
     definition: "Publicly disclosed access restrictions, authentication requirements, security headers.",
-    appliesTo: ALL, methods: ["http.status", "www-authenticate", "security headers", "json-ld isAccessibleForFree", "login-form detection", "openapi securitySchemes"],
+    appliesTo: ALL, methods: ["http.status", "www-authenticate", "security headers", "json-ld isAccessibleForFree", "login-form detection", "openapi securitySchemes", "archive zip-slip/bomb/encryption guards", "hls/dash encryption/DRM declarations", "robots.txt AI-crawler rules"],
     sensitivity: "public",
     fields: { accessRequiresAuth: "boolean", isAccessibleForFree: "boolean", securityHeaders: "object", missingSecurityHeaders: "array", hasLoginForm: "boolean", cacheControl: "string", securitySchemes: "array" },
     limitations: "Never probes or bypasses access controls; only reports what responses disclose.",
@@ -83,7 +83,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 8, key: "provenance", name: "Provenance",
     definition: "Where information originated: publisher, original URL, retrieval time, redirect chain.",
-    appliesTo: ALL, methods: ["fetch trace", "json-ld publisher", "og:site_name", "pdf producer", "exif software"],
+    appliesTo: ALL, methods: ["fetch trace", "json-ld publisher", "og:site_name", "pdf producer", "exif software", "warcinfo software", "netcdf institution/source", "parquet created_by", "gpx creator"],
     sensitivity: "public",
     fields: { requestedUrl: "url", finalUrl: "url", retrievedAt: "date", redirectChain: "array", publisher: "string", siteName: "string", producer: "string", creatorTool: "string" },
     limitations: "Publisher values are source-declared and not independently authenticated.",
@@ -91,7 +91,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 9, key: "lineage", name: "Lineage",
     definition: "Declared derivations: upstream sources, base models, isBasedOn, data sources.",
-    appliesTo: DATA.concat(["text"]), methods: ["json-ld isBasedOn", "datapackage sources", "model-card base_model/datasets"],
+    appliesTo: DATA.concat(["text"]), methods: ["json-ld isBasedOn", "datapackage sources", "model-card base_model/datasets", "package manifest dependencies", "netcdf/fits history"],
     sensitivity: "public",
     fields: { derivedFrom: "array", sources: "array", baseModel: "array", processingSteps: "array" },
     limitations: "Only declared lineage; no inferred derivation.",
@@ -107,7 +107,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 11, key: "version", name: "Version",
     definition: "Versions, revisions, releases and supersession.",
-    appliesTo: ALL, methods: ["etag", "json-ld version", "openapi info.version", "ooxml revision", "package metadata"],
+    appliesTo: ALL, methods: ["etag", "json-ld version", "openapi info.version", "ooxml revision", "package metadata", "package manifest version", "sqlite user_version"],
     sensitivity: "public",
     fields: { etag: "string", version: "string", revision: "string", softwareVersion: "string", latestRelease: "string" },
     limitations: "No cross-version diffing across stored history (service is stateless).",
@@ -115,7 +115,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 12, key: "temporal", name: "Temporal",
     definition: "Creation, publication, modification, capture and expiry timestamps (normalised to UTC, original kept).",
-    appliesTo: ALL, methods: ["http last-modified/date/expires", "article:* meta", "json-ld dates", "<time>", "pdf dates", "exif dates", "feed dates"],
+    appliesTo: ALL, methods: ["http last-modified/date/expires", "article:* meta", "json-ld dates", "<time>", "pdf dates", "exif dates", "feed dates", "warc capture dates", "gpx/kml time ranges", "netcdf time_coverage", "fits DATE-OBS"],
     sensitivity: "public",
     fields: { published: "date", modified: "date", created: "date", lastModifiedHeader: "date", serverDate: "date", expires: "date", retrievedAt: "date", temporalCoverage: "string" },
     limitations: "Timestamps without a timezone are interpreted as UTC and marked in `original`.",
@@ -123,7 +123,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 13, key: "spatial", name: "Spatial / geographic",
     definition: "Explicitly declared coordinates, places and coverage areas.",
-    appliesTo: ALL, methods: ["geo.position/ICBM meta", "json-ld geo/spatialCoverage", "exif gps"],
+    appliesTo: ALL, methods: ["geo.position/ICBM meta", "json-ld geo/spatialCoverage", "exif gps", "geojson/kml/gpx computed bbox", "netcdf ACDD extent", "geoparquet bbox"],
     sensitivity: "personal",
     fields: { coordinates: "object", placename: "string", region: "string", spatialCoverage: "string", gps: "object" },
     limitations: "EXIF GPS is rounded to ~1 km; locations are never inferred from unrelated signals.",
@@ -131,7 +131,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 14, key: "identifiers", name: "Identity & identifiers",
     definition: "DOIs, ISBNs, ORCIDs, ISSNs, ISRCs, UUIDs, canonical URLs and repository IDs.",
-    appliesTo: ALL, methods: ["regex+checksum validation", "citation_* meta", "json-ld identifier", "id3 isrc"],
+    appliesTo: ALL, methods: ["regex+checksum validation", "citation_* meta", "json-ld identifier", "id3 isrc", "epub dc:identifier/isbn"],
     sensitivity: "public",
     fields: { canonicalUrl: "url", doi: "array", isbn: "array", issn: "array", orcid: "array", arxiv: "array", isrc: "array", identifier: "array" },
     limitations: "ISBN/ISSN/ORCID are checksum-validated; alias resolution is not asserted.",
@@ -139,7 +139,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 15, key: "relational", name: "Relational",
     definition: "Explicit connections: isPartOf, references, sameAs, cites, supersedes, prev/next.",
-    appliesTo: ALL, methods: ["rel links", "json-ld relations", "citation_reference", "link headers"],
+    appliesTo: ALL, methods: ["rel links", "json-ld relations", "citation_reference", "link headers", "warc captured responses", "package repository"],
     sensitivity: "public",
     fields: { relationCount: "number", outboundDomains: "array", internalLinkCount: "number", externalLinkCount: "number" },
     limitations: "Relationships require explicit evidence; name similarity is never treated as identity.",
@@ -147,7 +147,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 16, key: "semantic", name: "Semantic",
     definition: "Vocabularies, typed entities and ontology terms (schema.org, Dublin Core, RDFa, microdata).",
-    appliesTo: ALL, methods: ["json-ld @type/@context", "microdata itemtype", "rdfa vocab/prefix", "xml namespaces"],
+    appliesTo: ALL, methods: ["json-ld @type/@context", "microdata itemtype", "rdfa vocab/prefix", "xml namespaces", "netcdf/fits units", "cf standard names"],
     sensitivity: "public",
     fields: { types: "array", vocabularies: "array", microdataTypes: "array", rdfaVocab: "array", xmlNamespaces: "array" },
     limitations: "No ontology reasoning; reports declared terms only.",
@@ -155,7 +155,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 17, key: "schema", name: "Schema",
     definition: "Data structure definitions: JSON Schema, OpenAPI, XSD, table schemas, inferred column types.",
-    appliesTo: DATA, methods: ["json-schema", "openapi", "xsd schemaLocation", "datapackage schema", "csv type inference"],
+    appliesTo: DATA, methods: ["json-schema", "openapi", "xsd schemaLocation", "datapackage schema", "csv type inference", "parquet schema", "netcdf variables", "sqlite_schema (byte parser)", "jsonl/yaml/toml inference", "geojson property keys"],
     sensitivity: "public",
     fields: { schemaType: "string", properties: "array", columns: "array", apiPaths: "number", xsd: "array" },
     limitations: "Inferred CSV/JSON types are labelled inferred.",
@@ -163,7 +163,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 18, key: "constraints", name: "Validation & constraints",
     definition: "Declared restrictions: required fields, enums, ranges, patterns, max lengths.",
-    appliesTo: DATA, methods: ["json-schema keywords", "html form constraints", "datapackage constraints"],
+    appliesTo: DATA, methods: ["json-schema keywords", "html form constraints", "datapackage constraints", "jsonl always-present keys"],
     sensitivity: "public",
     fields: { required: "array", enums: "array", ranges: "array", patterns: "array", formConstraints: "array" },
     limitations: "Constraints are reported, not enforced against data.",
@@ -171,7 +171,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 19, key: "statistical", name: "Statistical",
     definition: "Statistical interpretation: variables, units, sample sizes, aggregation, measurement technique.",
-    appliesTo: DATA, methods: ["json-ld variableMeasured/measurementTechnique", "csv column statistics"],
+    appliesTo: DATA, methods: ["json-ld variableMeasured/measurementTechnique", "csv column statistics", "parquet column statistics"],
     sensitivity: "public",
     fields: { variables: "array", columnStats: "array", sampleSize: "number", measurementTechnique: "string" },
     limitations: "Column statistics are computed over the fetched sample (body cap) and labelled inferred.",
@@ -219,7 +219,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 25, key: "discovery", name: "Discovery & indexing",
     definition: "Indexing directives and discovery aids: robots, sitemaps, feeds, alternates.",
-    appliesTo: ALL, methods: ["robots.txt", "x-robots-tag", "meta robots", "link rel=alternate", "sitemap"],
+    appliesTo: ALL, methods: ["robots.txt", "x-robots-tag", "meta robots", "link rel=alternate", "sitemap", "robots.txt parser"],
     sensitivity: "public",
     fields: { robotsAllowed: "boolean", robotsDirectives: "array", xRobotsTag: "string", sitemaps: "array", feeds: "array", crawlDelay: "number" },
     limitations: "Only the site's robots.txt and declared links; no search-engine index queries.",
@@ -243,7 +243,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 28, key: "file_system", name: "File system",
     definition: "File properties: filename, extension, size, server-declared modification time.",
-    appliesTo: ALL, methods: ["content-disposition", "url path", "content-length"],
+    appliesTo: ALL, methods: ["content-disposition", "url path", "content-length", "gzip FNAME", "archive extensions"],
     sensitivity: "public",
     fields: { filename: "string", extension: "string", sizeBytes: "number", serverModified: "date" },
     limitations: "Remote file permissions are not observable over HTTP.",
@@ -259,7 +259,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 30, key: "audio", name: "Audio",
     definition: "Track tags and technical audio properties.",
-    appliesTo: ["audio", "video"], methods: ["music-metadata"],
+    appliesTo: ["audio", "video"], methods: ["music-metadata", "ebml audio tracks", "hls/dash audio renditions"],
     sensitivity: "public",
     fields: { title: "string", artist: "array", album: "string", duration: "number", sampleRate: "number", bitrate: "number", channels: "number", codec: "string", lossless: "boolean" },
     limitations: "Files larger than the byte cap are parsed from a prefix; durations may be missing.",
@@ -267,7 +267,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 31, key: "video", name: "Video",
     definition: "Container, resolution, codecs, duration, subtitle/text tracks.",
-    appliesTo: ["video"], methods: ["music-metadata container parsing"],
+    appliesTo: ["video"], methods: ["music-metadata container parsing", "ebml (webm/mkv)", "hls/dash manifests", "subtitle tracks"],
     sensitivity: "public",
     fields: { container: "string", duration: "number", width: "number", height: "number", videoCodec: "string", audioCodec: "string", tracks: "array", subtitleTracks: "array" },
     limitations: "Frame rate is reported only when the container declares it.",
@@ -275,7 +275,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 32, key: "document", name: "Document",
     definition: "Document properties: authors, subject, page counts, revisions, creation dates.",
-    appliesTo: ["pdf", "office", "text"], methods: ["pdf-lib info dict", "ooxml/odf core props", "pdf xmp"],
+    appliesTo: ["pdf", "office", "text"], methods: ["pdf-lib info dict", "ooxml/odf core props", "pdf xmp", "epub opf"],
     sensitivity: "public",
     fields: { title: "string", author: "string", subject: "string", keywords: "array", pageCount: "number", wordCount: "number", revision: "string", application: "string", encrypted: "boolean" },
     limitations: "No OCR; text extraction limited to metadata, not full content.",
@@ -299,7 +299,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 35, key: "device_sensor", name: "Device & sensor",
     definition: "Published equipment information: camera/recorder models, firmware, instruments.",
-    appliesTo: ["image", "video", "audio", "webpage", "json"], methods: ["exif make/model/software", "json-ld measurementTechnique/instrument"],
+    appliesTo: ["image", "video", "audio", "webpage", "json"], methods: ["exif make/model/software", "json-ld measurementTechnique/instrument", "fits TELESCOP/INSTRUME", "gpx creator device"],
     sensitivity: "public",
     fields: { deviceMake: "string", deviceModel: "string", firmware: "string", instrument: "string", serialNumber: "string" },
     limitations: "Serial numbers are masked.",
@@ -307,7 +307,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 36, key: "scientific", name: "Scientific & experimental",
     definition: "Research context: citation metadata, journals, methods, instruments, citation files.",
-    appliesTo: ["webpage", "pdf", "json", "xml", "text"], methods: ["highwire citation_* meta", "json-ld ScholarlyArticle/Dataset", "CITATION.cff", "crossref corroboration"],
+    appliesTo: ["webpage", "pdf", "json", "xml", "text"], methods: ["highwire citation_* meta", "json-ld ScholarlyArticle/Dataset", "CITATION.cff", "crossref corroboration", "netcdf conventions", "fits hdus/celestial coordinates"],
     sensitivity: "public",
     fields: { journal: "string", publicationDate: "date", authors: "array", volume: "string", issue: "string", pages: "string", method: "string", citations: "number" },
     limitations: "Crossref corroboration requires a DOI and api.crossref.org availability.",
@@ -323,7 +323,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 38, key: "accessibility", name: "Accessibility",
     definition: "Declared accessibility features: language, alt text coverage, captions, landmarks, labels.",
-    appliesTo: ["webpage", "video", "pdf"], methods: ["html audit", "track kind=captions", "json-ld accessibility*", "pdf tagged"],
+    appliesTo: ["webpage", "video", "pdf"], methods: ["html audit", "track kind=captions", "json-ld accessibility*", "pdf tagged", "subtitle cues (vtt/srt/ttml)", "stream caption renditions", "epub nav"],
     sensitivity: "public",
     fields: { documentLanguage: "string", imagesTotal: "number", imagesWithAlt: "number", altCoverage: "number", captionTracks: "number", formInputs: "number", labelledInputs: "number", landmarks: "array", accessibilityFeatures: "array" },
     limitations: "Signals, not a WCAG conformance claim — presence of a caption field does not prove accessibility.",
@@ -331,7 +331,7 @@ export const CATEGORIES: CategoryDefinition[] = [
   {
     id: 39, key: "privacy", name: "Privacy & sensitivity",
     definition: "Privacy statements and personal-data indicators (counted and masked, never harvested).",
-    appliesTo: ALL, methods: ["privacy link detection", "pii pattern counts (masked)", "cookie headers", "exif gps presence"],
+    appliesTo: ALL, methods: ["privacy link detection", "pii pattern counts (masked)", "cookie headers", "exif gps presence", "gpx location-track flag"],
     sensitivity: "restricted",
     fields: { privacyPolicyUrl: "url", personalDataIndicators: "object", setsCookies: "boolean", thirdPartyScriptDomains: "array", containsGps: "boolean" },
     limitations: "PII values are never returned — only counts and masked forms.",
@@ -357,6 +357,10 @@ export const CATEGORIES: CategoryDefinition[] = [
 export const CATEGORY_BY_ID = new Map(CATEGORIES.map((c) => [c.id, c]));
 export const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
+/**
+ * Kind-level applicability. Format-level applicability (e.g. Spatial for GeoJSON, Video for
+ * HLS manifests, Document for EPUB) comes from formats.ts and is combined in pipeline.coverage().
+ */
 export function categoryApplies(id: number, kind: ResourceKind): boolean {
   const def = CATEGORY_BY_ID.get(id);
   if (!def) return false;

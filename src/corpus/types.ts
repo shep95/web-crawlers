@@ -1,5 +1,12 @@
 import type { CategoryCoverage, MetadataField, QualityReport, Relationship, ResourceRecord } from "../metadata/types.js";
+import type { LifecycleState } from "./lifecycle.js";
+import type { ResourceFacets } from "./facets.js";
+import type { CoverageRaw } from "./coverage.js";
 
+/**
+ * Scheduling state (legacy, kept for API/data compatibility): what the frontier may lease and what search
+ * may return. The finer processing state is `lifecycle` (see ./lifecycle.ts).
+ */
 export type ResourceState =
   | "queued" // discovered, waiting for retrieval
   | "leased" // a worker is processing it
@@ -60,6 +67,30 @@ export interface ResourceRow {
   duplicate_of: number | null;
   last_error: string | null;
   final_url: string | null;
+  /** Item state machine (./lifecycle.ts); null only for rows not yet reached by the lifecycle-v1 backfill. */
+  lifecycle: LifecycleState | null;
+  lifecycle_at: string | null;
+  lifecycle_reason: string | null;
+  /** Consecutive retryable failures (reset on any non-retry outcome). */
+  failures: number;
+  mime: string | null;
+  language: string | null;
+  published_at: string | null;
+  categories_observed: number | null;
+  /** When language/publication/category facets were last measured (null = unmeasured). */
+  facets_at: string | null;
+  /** Comma-separated validation issue codes of the last validated round ('' = none, null = not validated). */
+  validation_issues: string | null;
+  /** Set on rows returned by lease(): the scheduling state before the lease (queued = new, indexed/unavailable = revisit). */
+  previous_state?: ResourceState;
+}
+
+export interface TransitionRow {
+  ts: string;
+  from: string | null;
+  to: LifecycleState;
+  reason: string | null;
+  detail: string | null;
 }
 
 export interface SnapshotRow {
@@ -100,6 +131,7 @@ export interface LinkedResource {
 export const SYSTEM_RETENTION = {
   snapshotsPerResource: Number(process.env.SNAPSHOTS_PER_RESOURCE ?? 5),
   eventsDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
+  transitionsDays: Number(process.env.TRANSITION_RETENTION_DAYS ?? 90),
   rawBodies: "not stored — only extracted metadata and a capped text excerpt (≤ 100 KB) for search",
   personalData: "PII is never stored as values — only counts and masked forms",
 };
@@ -159,6 +191,23 @@ export interface Corpus {
   claimSource(id: string, intervalMs: number, now: number): Promise<boolean>;
   recordSourceRun(id: string, count: number, error: string | null, now: number): Promise<void>;
   stats(): Promise<Record<string, unknown> & { byState: Record<string, number> }>;
+
+  // item state machine
+  /**
+   * Guarded lifecycle transition: validates every step of `from → path…` against the transition table,
+   * applies it only if the row is still in `from` (compare-and-set), and records each step with a timestamp.
+   * Throws IllegalTransitionError otherwise.
+   */
+  transition(id: number, from: LifecycleState, path: LifecycleState | LifecycleState[], reason?: string | null, detail?: string | null, patch?: Partial<Omit<ResourceRow, "id">>): Promise<LifecycleState>;
+  transitionsFor(resourceId: number, limit?: number): Promise<TransitionRow[]>;
+  /** Store per-round derived facets (language, publication date, category/field-status breakdown). */
+  setFacets(resourceId: number, facets: ResourceFacets, at: string): Promise<void>;
+  /** Raw aggregates for GET /api/v2/coverage. */
+  coverageRaw(now: number): Promise<CoverageRaw>;
+  /** Live evidence for the capability matrix: resources of each kind with each category observed. */
+  liveCategoryEvidence(): Promise<Array<{ kind: string; category: number; resources: number }>>;
+  /** Fill lifecycle (from legacy state) and facets (from stored observations) for older rows, in batches. */
+  backfill(opts?: { batch?: number; maxBatches?: number }): Promise<{ lifecycle: number; facets: number }>;
 
   // learning: URL-pattern yield model and extractor reliability
   recordPattern(key: string, host: string, o: { indexed: boolean; failed: boolean; fields: number; categories: number; ms: number }): Promise<void>;

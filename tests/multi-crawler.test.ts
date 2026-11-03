@@ -61,6 +61,8 @@ const source: DiscoverySource = {
   },
 };
 
+// Without TEST_DATABASE_URL there is no Postgres backend: report the suite as skipped rather than "no suite found".
+if (backends().length < 2) describe.skip("multiple crawler replicas on one shared frontier [postgres: TEST_DATABASE_URL not set]", () => it("requires Postgres", () => undefined));
 for (const makeBackend of backends().slice(1)) {
   // Postgres only: SQLite is a single-writer, single-process backend by design.
   const backend = makeBackend();

@@ -15,6 +15,32 @@ import { understandQuery, type QueryPlan } from "../query/understand.js";
 import { askCorpus } from "../query/execute.js";
 import { LruCache } from "../util/async.js";
 import { ApiKeys } from "./guards.js";
+import { buildCoverageReport, type CountryEntry, type CoverageReport } from "../corpus/coverage.js";
+import { buildCapabilities, loadFormatRegistry } from "../corpus/capabilities.js";
+import { LIFECYCLE_STATES, RETRY_POLICY, TRANSITIONS } from "../corpus/lifecycle.js";
+import { getEgressMode } from "../net/safe-fetch.js";
+
+/**
+ * Integration point for the geography registry (src/geo, 249 ISO 3166-1 entries). Any exported array of
+ * { code | alpha2 | iso2, name } is accepted; without it the coverage API uses ccTLDs observed in the corpus.
+ */
+export async function loadCountryRegistry(): Promise<{ list: CountryEntry[]; source: string } | null> {
+  for (const spec of [new URL("../geo/index.js", import.meta.url).href, new URL("../geo/index.ts", import.meta.url).href]) {
+    try {
+      const mod = (await import(spec)) as Record<string, unknown>;
+      for (const [key, v] of Object.entries(mod)) {
+        if (!Array.isArray(v) || v.length < 100) continue;
+        const list = v
+          .map((e: Record<string, unknown>) => ({ code: String(e?.code ?? e?.alpha2 ?? e?.iso2 ?? "").toUpperCase(), name: String(e?.name ?? e?.shortName ?? "") }))
+          .filter((e) => /^[A-Z]{2}$/.test(e.code));
+        if (list.length >= 100) return { list, source: `src/geo (${key})` };
+      }
+    } catch {
+      /* registry not present yet */
+    }
+  }
+  return null;
+}
 
 const SearchQ = z.object({
   q: z.string().trim().min(1).max(500),
@@ -44,8 +70,38 @@ function cachedStats(store: Corpus) {
   return statsCache.value;
 }
 
-export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus; crawlers: AutonomousCrawler[]; keys: ApiKeys; topicalDiscovery: boolean }) {
+export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus; crawlers: AutonomousCrawler[]; keys: ApiKeys; topicalDiscovery: boolean; countries?: () => CountryEntry[] | null }) {
   const { store, crawlers, keys } = deps;
+
+  // Coverage aggregates scan the whole resources table: computed at most once per TTL per replica, single-flight.
+  const COVERAGE_TTL = Number(process.env.COVERAGE_CACHE_TTL_MS ?? 60_000);
+  let coverageCache: { at: number; value: Promise<CoverageReport & { tookMs: number }> } | null = null;
+  const countryRegistry = loadCountryRegistry();
+  const coverageReport = () => {
+    if (!coverageCache || Date.now() - coverageCache.at > COVERAGE_TTL) {
+      const t0 = Date.now();
+      const value = (async () => {
+        const injected = deps.countries?.() ?? null;
+        const geo = injected ? { list: injected, source: "injected" } : await countryRegistry;
+        const raw = await store.coverageRaw(Date.now());
+        return { ...buildCoverageReport(raw, { countries: geo?.list ?? null, registrySource: geo?.source }), tookMs: Date.now() - t0 };
+      })();
+      coverageCache = { at: Date.now(), value };
+      value.catch(() => (coverageCache = null));
+    }
+    return coverageCache;
+  };
+  app.get("/api/v2/coverage", async (_req, reply) => {
+    const c = coverageReport();
+    const body = await c.value;
+    reply.header("cache-control", "public, max-age=30");
+    return { ...body, cache: { ttlSeconds: COVERAGE_TTL / 1000, ageSeconds: Math.round((Date.now() - c.at) / 1000) } };
+  });
+
+  app.get("/api/v2/capabilities", async () => {
+    const [live, formats] = await Promise.all([store.liveCategoryEvidence().catch(() => null), loadFormatRegistry()]);
+    return buildCapabilities({ live, formats, enrich: process.env.CRAWL_ENRICH !== "off", egress: getEgressMode() });
+  });
 
   /**
    * Ask a question of the collected corpus. Results are this system's own
@@ -167,6 +223,7 @@ export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus
     crawlersInThisProcess: crawlers.map((c) => ({ id: c.id, profile: c.profile, running: c.isRunning, processedSinceStart: c.processed, startedAt: c.startedAt ? new Date(c.startedAt).toISOString() : null })),
     frontier: await store.frontierSize(),
     systemRetention: SYSTEM_RETENTION,
+    lifecycle: { states: LIFECYCLE_STATES, transitions: TRANSITIONS, retryPolicy: { maxAttempts: RETRY_POLICY.maxAttempts, baseBackoffMs: RETRY_POLICY.baseBackoffMs, maxBackoffMs: RETRY_POLICY.maxBackoffMs, maxRetryAfterMs: RETRY_POLICY.maxRetryAfterMs } },
     ...(await store.stats()),
   }));
 

@@ -23,7 +23,7 @@ export function openApiSpec(serverUrl?: string) {
         Fact: obj({ value: {}, field: str, method: str, evidenceType: { enum: ["direct_extraction", "source_claim", "system_measurement", "inferred"] }, scope: { enum: ["resource", "collection", "organization", "site"] }, via: str }),
         Observation: obj({
           category: int, field: str, value: {}, original: str,
-          status: { enum: ["observed", "source_declared", "corroborated", "inferred", "contradicted", "extraction_failed"] },
+          status: { enum: ["observed", "source_declared", "corroborated", "inferred", "contradicted", "unavailable", "extraction_failed"] },
           evidenceType: str, scope: str, method: str, extractor: str, evidence: str, sensitivity: str, masked: { type: "boolean" }, observedAt: str,
         }),
         CategoryState: obj({ id: int, key: str, name: str, state: { enum: ["observed", "not_found_after_inspection", "unavailable", "not_applicable", "extraction_failed"] }, fieldCount: int, note: str }),
@@ -74,6 +74,8 @@ export function openApiSpec(serverUrl?: string) {
       "/api/v2/geography": { get: { summary: "Geography registry: all 249 ISO 3166-1 entries (type, UN status, M.49 region, ccTLDs, languages), the separate non-ISO layer and counts; ?q= searches every name, endonym, translation and demonym", parameters: [{ name: "q", in: "query", schema: { ...str, maxLength: 100 }, example: "Deutschland" }, { name: "limit", in: "query", schema: { ...int, minimum: 1, maximum: 300 } }], responses: { 200: { description: "Registry summary and entries" }, 400: err } } },
       "/api/v2/geography/{code}": { get: { summary: "One entry by ISO 3166-1 alpha-2/alpha-3/numeric code, non-ISO code (XK, EU, UK, EL) or ISO 3166-2 code, with its subdivisions", parameters: [{ name: "code", in: "path", required: true, schema: str, example: "IN" }], responses: { 200: { description: "Entry" }, 400: err, 404: err } } },
       "/api/v2/crawler/status": { get: { summary: "Frontier, states, sources, recent crawler events", responses: { 200: { description: "Status" } } } },
+      "/api/v2/coverage": { get: { summary: "Measured coverage: lifecycle counts, failures by reason, per hosting-country (ccTLD, weak), language, kind/MIME, source family and category (field statuses). 0 = measured zero, \"unknown\" = not measured. Cached ~60 s.", responses: { 200: { description: "Coverage report" } } } },
+      "/api/v2/capabilities": { get: { summary: "41-category × format capability matrix: configured / implemented / tested / live verified / blocked / unknown", responses: { 200: { description: "Capability matrix" } } } },
       "/api/v2/crawler/capabilities": { get: { summary: "Extractor reliability and learned URL-pattern yields", responses: { 200: { description: "Capabilities" } } } },
       "/api/v2/analyze": { get: { summary: "Inspect one public URL now (optional; crawling does not require it)", parameters: [{ name: "url", in: "query", required: true, schema: str }], responses: { 200: { description: "Record" }, 403: err, 451: err } } },
       "/api/v2/analyze/upload": { post: { summary: "Inspect an uploaded file (raw body; X-Filename / X-Content-Type headers)", requestBody: { content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } } }, responses: { 200: { description: "Record" }, 400: err } } },

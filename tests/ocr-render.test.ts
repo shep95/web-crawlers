@@ -95,3 +95,47 @@ describe.skipIf(!chromiumAvailable)("selective JS rendering", () => {
     await store.close();
   }, 90_000);
 });
+
+describe("OCR language routing (multilingual models from npm, no network)", async () => {
+  const { routeOcr, installedModels, urlLanguageHints } = await import("../src/metadata/ocr-languages.js");
+  it("lists the installed models", () => {
+    expect([...installedModels().keys()].sort()).toEqual(["ara", "ben", "chi_sim", "deu", "ell", "eng", "fra", "heb", "hin", "jpn", "kor", "por", "rus", "spa", "tha"]);
+  });
+  it("routes by declared language and script", () => {
+    expect(routeOcr({ languages: [{ tag: "hi-IN", source: "t" }] })).toMatchObject({ status: "ok", models: ["hin", "eng"], script: "Devanagari" });
+    expect(routeOcr({ languages: [{ tag: "zh-CN", source: "t" }] })).toMatchObject({ status: "ok", models: ["chi_sim", "eng"] });
+    expect(routeOcr({ languages: [{ tag: "ara", source: "t" }] })).toMatchObject({ status: "ok", models: ["ara", "eng"], script: "Arabic" });
+    expect(routeOcr({ languages: [{ tag: "es", source: "t" }] }).models).toEqual(["spa", "eng"]);
+  });
+  it("reports ocr_model_unavailable for scripts without a model instead of running eng", () => {
+    expect(routeOcr({ languages: [{ tag: "am", source: "t" }] })).toMatchObject({ status: "ocr_model_unavailable", script: "Ethiopic", models: [] });
+    expect(routeOcr({ languages: [{ tag: "ka", source: "t" }] })).toMatchObject({ status: "ocr_model_unavailable", script: "Georgian" });
+    expect(routeOcr({ languages: [{ tag: "zh-TW", source: "t" }] })).toMatchObject({ status: "ocr_model_unavailable", script: "Han (Traditional)" });
+  });
+  it("uses the Latin fallback only for Latin-script languages or when nothing is declared", () => {
+    const sw = routeOcr({ languages: [{ tag: "sw", source: "t" }] });
+    expect(sw).toMatchObject({ status: "ok", models: ["eng"], script: "Latin" });
+    expect((sw as { note?: string }).note).toMatch(/Latin-script fallback/);
+    expect(routeOcr({})).toMatchObject({ status: "ok", models: ["eng"], source: "none_declared" });
+  });
+  it("derives weak hints from URL path, query and ccTLD (not a US/English default)", () => {
+    expect(urlLanguageHints("https://news.example.jp/a/scan.png").map((h) => h.tag)).toEqual(["ja"]);
+    expect(routeOcr({ url: "https://site.example/ru/scan.png" }).models).toEqual(["rus", "eng"]);
+    expect(routeOcr({ url: "https://gov.example.th/scan.png" }).models).toEqual(["tha", "eng"]);
+  });
+  it("records the routing on the image and skips OCR when the script has no model", async () => {
+    const png = readFileSync(new URL("./fixtures/ocr-sample.png", import.meta.url));
+    const r = await analyzeResponse(F.response(png, { "content-type": "image/png", "content-language": "am" }, "https://fixture.test/scan.png"), { sourceType: "url", enrich: false });
+    const routing = r.fields.find((f) => f.field === "ocrRouting")!;
+    expect(routing.status).toBe("unavailable");
+    expect(routing.value).toMatchObject({ status: "ocr_model_unavailable", script: "Ethiopic", languageSource: "http Content-Language" });
+    expect(r.fields.find((f) => f.field === "ocrText")).toBeUndefined();
+  });
+  it("loads a non-English model combination for a declared language", async () => {
+    const png = readFileSync(new URL("./fixtures/ocr-sample.png", import.meta.url));
+    const r = await analyzeResponse(F.response(png, { "content-type": "image/png", "content-language": "fr" }, "https://fixture.test/scan.png"), { sourceType: "url", enrich: false });
+    expect(r.fields.find((f) => f.field === "ocrRouting")?.value).toMatchObject({ status: "ok", models: ["fra", "eng"] });
+    expect(String(r.fields.find((f) => f.field === "ocrText")?.value ?? "").toUpperCase()).toContain("SNOWFALL");
+    expect(r.fields.find((f) => f.field === "ocrText")?.method).toBe("tesseract OCR (fra+eng)");
+  }, 90_000);
+});

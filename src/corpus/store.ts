@@ -5,7 +5,10 @@ import { dirname } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import type { MetadataField, ResourceRecord } from "../metadata/types.js";
-import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord, type StoredText } from "./types.js";
+import { SYSTEM_RETENTION, TEXT_EXCERPT, profileBoostSql, type CrawlerProfile, type PatternStat, type Corpus, type FrontierItem, type LinkedResource, type ResourceRow, type ResourceState, type SearchCandidate, type SnapshotRow, type StoredRecord, type StoredText, type TransitionRow } from "./types.js";
+import { IllegalTransitionError, LEGACY_LIFECYCLE_SQL, LEGACY_REASON_SQL, LIFECYCLE_EXPR, assertTransition, canTransition, lifecycleFromLegacy, type LifecycleState } from "./lifecycle.js";
+import { facetsFromSnapshots, type ResourceFacets } from "./facets.js";
+import { SQLITE_DIALECT, collectCoverage, type CoverageRaw } from "./coverage.js";
 import { redactForIndex, redactSecrets } from "../text/secrets.js";
 
 export * from "./types.js";
@@ -91,8 +94,30 @@ CREATE INDEX IF NOT EXISTS idx_events_res ON events(resource_id, id);
 CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, last_run_at INTEGER, last_count INTEGER, last_error TEXT, runs INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS patterns (key TEXT PRIMARY KEY, host TEXT NOT NULL, fetched INTEGER NOT NULL DEFAULT 0, indexed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, fields_sum INTEGER NOT NULL DEFAULT 0, cats_sum INTEGER NOT NULL DEFAULT 0, ms_sum INTEGER NOT NULL DEFAULT 0, last_at TEXT);
 CREATE TABLE IF NOT EXISTS extractor_stats (id TEXT PRIMARY KEY, runs INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0, fields INTEGER NOT NULL DEFAULT 0, ms INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS transitions (id INTEGER PRIMARY KEY, resource_id INTEGER NOT NULL, ts TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL, reason TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS idx_transitions_res ON transitions(resource_id, id);
+CREATE INDEX IF NOT EXISTS idx_transitions_ts ON transitions(ts);
+CREATE TABLE IF NOT EXISTS resource_coverage (
+  resource_id INTEGER NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  category INTEGER NOT NULL, state TEXT NOT NULL, fields INTEGER NOT NULL DEFAULT 0,
+  observed INTEGER NOT NULL DEFAULT 0, source_declared INTEGER NOT NULL DEFAULT 0, corroborated INTEGER NOT NULL DEFAULT 0,
+  inferred INTEGER NOT NULL DEFAULT 0, contradicted INTEGER NOT NULL DEFAULT 0, extraction_failed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (resource_id, category)
+);
+CREATE INDEX IF NOT EXISTS idx_rescov_cat ON resource_coverage(category, state);
 CREATE VIRTUAL TABLE IF NOT EXISTS corpus_fts USING fts5(title, description, meta, body, url, tokenize = 'porter unicode61 remove_diacritics 2');
 `;
+
+/** Columns added by data migration "lifecycle-v1" (item state machine + coverage facets). */
+export const LIFECYCLE_COLUMNS: Array<[string, string]> = [
+  ["lifecycle", "TEXT"], ["lifecycle_at", "TEXT"], ["lifecycle_reason", "TEXT"], ["failures", "INTEGER NOT NULL DEFAULT 0"],
+  ["mime", "TEXT"], ["language", "TEXT"], ["published_at", "TEXT"], ["categories_observed", "INTEGER"], ["facets_at", "TEXT"], ["validation_issues", "TEXT"],
+];
+
+/** Coverage rows stored per resource (not_applicable rows carry no fields and are derived instead). */
+export function coverageRows(facets: ResourceFacets) {
+  return facets.coverage.filter((c) => c.state !== "not_applicable" || c.fields > 0);
+}
 
 export function valueText(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -146,6 +171,26 @@ export class SqliteCorpus implements Corpus {
     const now = Date.now();
     if (this.db.prepare(`INSERT OR IGNORE INTO data_migrations (id, applied_at) VALUES ('content-text-v1', ?)`).run(now).changes)
       this.db.prepare(`UPDATE resources SET due_at = ? + (id % 1440) * 60000 WHERE state = 'indexed' AND kind = 'webpage' AND duplicate_of IS NULL`).run(now);
+    this.migrateLifecycle(now);
+  }
+
+  /**
+   * Data migration "lifecycle-v1": adds the lifecycle/facet columns and derives each existing row's lifecycle
+   * from its legacy state (old state names stay valid in `state`). Each migrated row gets one transition
+   * `legacy:<state> → <lifecycle>` so its history shows where the value came from.
+   */
+  private migrateLifecycle(now: number): void {
+    const cols = new Set((this.db.prepare(`PRAGMA table_info(resources)`).all() as Array<{ name: string }>).map((c) => c.name));
+    for (const [c, def] of LIFECYCLE_COLUMNS) if (!cols.has(c)) this.db.exec(`ALTER TABLE resources ADD COLUMN ${c} ${def}`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_res_lifecycle ON resources(lifecycle)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_res_facets_pending ON resources(id) WHERE facets_at IS NULL`);
+    if (!this.db.prepare(`INSERT OR IGNORE INTO data_migrations (id, applied_at) VALUES ('lifecycle-v1', ?)`).run(now).changes) return;
+    const ts = new Date(now).toISOString();
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO transitions (resource_id, ts, from_state, to_state, reason, detail)
+        SELECT id, ?, 'legacy:' || state, ${LEGACY_LIFECYCLE_SQL}, 'migration:lifecycle-v1', ${LEGACY_REASON_SQL} FROM resources WHERE lifecycle IS NULL`).run(ts);
+      this.db.prepare(`UPDATE resources SET lifecycle = ${LEGACY_LIFECYCLE_SQL}, lifecycle_reason = ${LEGACY_REASON_SQL}, lifecycle_at = COALESCE(indexed_at, retrieved_at, discovered_at) WHERE lifecycle IS NULL`).run();
+    })();
   }
 
   async close(): Promise<void> {
@@ -157,18 +202,24 @@ export class SqliteCorpus implements Corpus {
   }
 
   async recoverLeases(now: number): Promise<number> {
-    const r = this.db.prepare(`UPDATE resources SET state='queued', lease_until=NULL WHERE state='leased' AND (lease_until IS NULL OR lease_until < ?)`).run(now);
+    const ts = new Date(Math.min(now, Date.now())).toISOString();
+    const where = `state='leased' AND (lease_until IS NULL OR lease_until < ?)`;
+    const r = this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO transitions (resource_id, ts, from_state, to_state, reason) SELECT id, ?, ${LIFECYCLE_EXPR}, 'scheduled', 'lease_expired' FROM resources WHERE ${where}`).run(ts, now);
+      return this.db.prepare(`UPDATE resources SET state='queued', lease_until=NULL, lifecycle='scheduled', lifecycle_at=?, lifecycle_reason='lease_expired' WHERE ${where}`).run(ts, now);
+    })();
     if (r.changes) await this.event(null, "lease_recovery", `${r.changes} abandoned lease(s) returned to the queue`);
     return r.changes;
   }
 
   async enqueue(items: FrontierItem[], now = Date.now()): Promise<number> {
     items = items.filter((i) => !isExcludedUrl(i.url));
-    const insert = this.db.prepare(`INSERT INTO resources (url, url_hash, host, state, priority, depth, via, purpose, parent_id, due_at, discovered_at)
-      VALUES (@url, @hash, @host, 'queued', @priority, @depth, @via, @purpose, @parentId, @due, @ts)
+    const insert = this.db.prepare(`INSERT INTO resources (url, url_hash, host, state, priority, depth, via, purpose, parent_id, due_at, discovered_at, lifecycle, lifecycle_at, lifecycle_reason)
+      VALUES (@url, @hash, @host, 'queued', @priority, @depth, @via, @purpose, @parentId, @due, @ts, 'discovered', @ts, @via)
       ON CONFLICT(url) DO UPDATE SET priority = MAX(priority, excluded.priority) WHERE state = 'queued'`);
     const exists = this.db.prepare(`SELECT id FROM resources WHERE url = ?`);
     const host = this.db.prepare(`INSERT INTO hosts (host, first_seen, enqueued) VALUES (?, ?, 1) ON CONFLICT(host) DO UPDATE SET enqueued = enqueued + 1`);
+    const tr = this.db.prepare(`INSERT INTO transitions (resource_id, ts, from_state, to_state, reason, detail) VALUES (?, ?, NULL, 'discovered', ?, ?)`);
     // An edge may already exist from the source's own extraction; merge the discovery purpose into it.
     const rel = this.db.prepare(`INSERT INTO relationships (source_id, target_url, target_id, type, purpose, scope, evidence, method, status, observed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'crawler reference classification', 'source_declared', ?)
@@ -185,6 +236,7 @@ export class SqliteCorpus implements Corpus {
         if (!before) {
           added++;
           host.run(h, ts);
+          tr.run(id, ts, it.via, it.parentId ? `referenced by #${it.parentId}${it.relation ? ` (${it.relation})` : ""}` : null);
         }
         if (it.parentId && it.relation) rel.run(it.parentId, it.url, id, it.relation, it.purpose, it.scope ?? "resource", it.anchor ? `anchor: ${it.anchor}` : it.via, ts);
       }
@@ -221,9 +273,19 @@ export class SqliteCorpus implements Corpus {
         picked.push(c);
         if (picked.length >= n) break;
       }
-      const upd = this.db.prepare(`UPDATE resources SET state='leased', lease_until=?, attempts=attempts+1 WHERE id=?`);
-      for (const p of picked) upd.run(now + leaseMs, p.id);
-      return picked;
+      const ts = new Date().toISOString();
+      const upd = this.db.prepare(`UPDATE resources SET state='leased', lease_until=?, attempts=attempts+1, lifecycle='leased', lifecycle_at=?, lifecycle_reason=? WHERE id=?`);
+      const tr = this.db.prepare(`INSERT INTO transitions (resource_id, ts, from_state, to_state, reason) VALUES (?, ?, ?, 'leased', ?)`);
+      const out: ResourceRow[] = [];
+      for (const p of picked) {
+        const prev = p.lifecycle ?? lifecycleFromLegacy(p);
+        if (!canTransition(prev, "leased")) continue; // guard: e.g. a stale in-flight row; never leased twice
+        const reason = p.state === "queued" ? "new" : "revisit";
+        upd.run(now + leaseMs, ts, reason, p.id);
+        tr.run(p.id, ts, prev, reason);
+        out.push({ ...p, state: "leased", lease_until: now + leaseMs, attempts: p.attempts + 1, lifecycle: "leased", lifecycle_at: ts, lifecycle_reason: reason, previous_state: p.state } as ResourceRow);
+      }
+      return out;
     })();
   }
 
@@ -258,6 +320,80 @@ export class SqliteCorpus implements Corpus {
   async finish(id: number, state: ResourceState, dueAt: number, patch: Partial<Omit<ResourceRow, "id">> = {}): Promise<void> {
     await this.setStage(id, { ...patch, state, due_at: dueAt, lease_until: null });
   }
+
+  async transition(id: number, from: LifecycleState, path: LifecycleState | LifecycleState[], reason: string | null = null, detail: string | null = null, patch: Partial<Omit<ResourceRow, "id">> = {}): Promise<LifecycleState> {
+    const steps = typeof path === "string" ? [path] : path;
+    const to = assertTransition(from, steps, id);
+    const ts = new Date().toISOString();
+    const keys = Object.keys(patch).filter((k) => /^[a-z_]+$/.test(k) && !k.startsWith("lifecycle"));
+    this.db.transaction(() => {
+      const r = this.db.prepare(`UPDATE resources SET ${keys.map((k) => `${k} = @${k}, `).join("")}lifecycle = @to, lifecycle_at = @ts, lifecycle_reason = @reason WHERE id = @id AND COALESCE(lifecycle, ${LEGACY_LIFECYCLE_SQL}) = @from`)
+        .run({ ...Object.fromEntries(keys.map((k) => [k, (patch as Record<string, unknown>)[k]])), to, ts, reason, id, from });
+      if (!r.changes) {
+        const cur = this.db.prepare(`SELECT ${LIFECYCLE_EXPR} AS lc FROM resources WHERE id = ?`).get(id) as { lc: string } | undefined;
+        throw new IllegalTransitionError(cur?.lc ?? null, steps[0], id, cur ? `row is in ${cur.lc}, expected ${from}` : "no such resource");
+      }
+      const ins = this.db.prepare(`INSERT INTO transitions (resource_id, ts, from_state, to_state, reason, detail) VALUES (?, ?, ?, ?, ?, ?)`);
+      let prev: string = from;
+      for (const s of steps) {
+        ins.run(id, ts, prev, s, reason, detail?.slice(0, 500) ?? null);
+        prev = s;
+      }
+    })();
+    return to;
+  }
+
+  async transitionsFor(resourceId: number, limit = 100): Promise<TransitionRow[]> {
+    return (this.db.prepare(`SELECT ts, from_state, to_state, reason, detail FROM transitions WHERE resource_id = ? ORDER BY id DESC LIMIT ?`).all(resourceId, limit) as Array<Record<string, string | null>>)
+      .map((r) => ({ ts: r.ts!, from: r.from_state, to: r.to_state as LifecycleState, reason: r.reason, detail: r.detail }));
+  }
+
+  async setFacets(resourceId: number, facets: ResourceFacets, at: string): Promise<void> {
+    this.writeFacets(resourceId, facets, at, false);
+  }
+
+  private writeFacets(resourceId: number, facets: ResourceFacets, at: string, onlyIfUnmeasured: boolean): void {
+    this.db.transaction(() => {
+      const r = this.db.prepare(`UPDATE resources SET language = ?, published_at = ?, categories_observed = ?, mime = COALESCE(?, mime), facets_at = ? WHERE id = ?${onlyIfUnmeasured ? " AND facets_at IS NULL" : ""}`)
+        .run(facets.language, facets.published_at, facets.categories_observed, facets.mime, at, resourceId);
+      if (!r.changes) return;
+      this.db.prepare(`DELETE FROM resource_coverage WHERE resource_id = ?`).run(resourceId);
+      const ins = this.db.prepare(`INSERT INTO resource_coverage (resource_id, category, state, fields, observed, source_declared, corroborated, inferred, contradicted, extraction_failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const c of coverageRows(facets)) ins.run(resourceId, c.category, c.state, c.fields, c.byStatus.observed, c.byStatus.source_declared, c.byStatus.corroborated, c.byStatus.inferred, c.byStatus.contradicted, c.byStatus.extraction_failed);
+    })();
+  }
+
+  async coverageRaw(now: number): Promise<CoverageRaw> {
+    return collectCoverage(async (sql) => this.db.prepare(sql).all() as Array<Record<string, unknown>>, SQLITE_DIALECT, this.backend, now);
+  }
+
+  async liveCategoryEvidence() {
+    return this.db.prepare(`SELECT r.kind AS kind, c.category AS category, COUNT(*) AS resources FROM resource_coverage c JOIN resources r ON r.id = c.resource_id
+      WHERE c.state = 'observed' AND r.kind IS NOT NULL GROUP BY r.kind, c.category`).all() as Array<{ kind: string; category: number; resources: number }>;
+  }
+
+  async backfill(opts: { batch?: number; maxBatches?: number } = {}): Promise<{ lifecycle: number; facets: number }> {
+    const batch = opts.batch ?? 200;
+    let lifecycle = 0;
+    let facets = 0;
+    try {
+      lifecycle = this.db.prepare(`UPDATE resources SET lifecycle = ${LEGACY_LIFECYCLE_SQL}, lifecycle_reason = ${LEGACY_REASON_SQL} WHERE lifecycle IS NULL`).run().changes;
+      for (let i = 0; i < (opts.maxBatches ?? Infinity); i++) {
+        const rows = this.db.prepare(`SELECT r.id, s.id AS sid, s.fetched_at, s.mime, s.http_status FROM resources r JOIN snapshots s ON s.id = (SELECT MAX(id) FROM snapshots WHERE resource_id = r.id)
+          WHERE r.facets_at IS NULL AND r.snapshot_count > 0 AND r.state != 'leased' AND r.id > ? ORDER BY r.id LIMIT ?`).all(i === 0 ? 0 : this.lastBackfillId, batch) as Array<{ id: number; sid: number; fetched_at: string; mime: string | null; http_status: number | null }>;
+        if (!rows.length) break;
+        this.lastBackfillId = rows[rows.length - 1].id;
+        for (const f of await facetsFromSnapshots(this, rows)) this.writeFacets(f.id, f.facets, new Date().toISOString(), true);
+        facets += rows.length;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      if (lifecycle || facets) await this.event(null, "lifecycle_backfill", `${lifecycle} lifecycle rows, ${facets} facet rows`);
+    } catch {
+      /* closed database or concurrent shutdown: the next start resumes */
+    }
+    return { lifecycle, facets };
+  }
+  private lastBackfillId = 0;
 
   async latestSnapshot(resourceId: number) {
     return this.db.prepare(`SELECT id, content_hash, fetched_at FROM snapshots WHERE resource_id = ? ORDER BY id DESC LIMIT 1`).get(resourceId) as { id: number; content_hash: string | null; fetched_at: string } | undefined;
@@ -302,6 +438,7 @@ export class SqliteCorpus implements Corpus {
   }
 
   async pruneEvents(now: number): Promise<number> {
+    this.db.prepare(`DELETE FROM transitions WHERE ts < ?`).run(new Date(now - SYSTEM_RETENTION.transitionsDays * 86400_000).toISOString());
     return this.db.prepare(`DELETE FROM events WHERE ts < ?`).run(new Date(now - SYSTEM_RETENTION.eventsDays * 86400_000).toISOString()).changes;
   }
 
@@ -322,6 +459,7 @@ export class SqliteCorpus implements Corpus {
       backend: this.backend,
       resources: one(`SELECT COUNT(*) n FROM resources`),
       byState: group(`SELECT state k, COUNT(*) n FROM resources GROUP BY state`) as Record<string, number>,
+      byLifecycle: group(`SELECT ${LIFECYCLE_EXPR} k, COUNT(*) n FROM resources GROUP BY 1`),
       byKind: group(`SELECT kind k, COUNT(*) n FROM resources WHERE kind IS NOT NULL GROUP BY kind`),
       byPurpose: group(`SELECT purpose k, COUNT(*) n FROM resources GROUP BY purpose`),
       hosts: one(`SELECT COUNT(*) n FROM hosts`),

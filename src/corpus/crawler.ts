@@ -7,8 +7,18 @@ import type { MetadataField, ResourceKind, ResourceRecord } from "../metadata/ty
 import { safeFetch, type SafeResponse, FetchBlockedError } from "../net/safe-fetch.js";
 import { checkUrl } from "../net/ip-guard.js";
 import { collectReferences, classifyReference, DEFAULT_LIMITS, type CrawlLimits, type Reference } from "./discovery.js";
-import { allSources, type DiscoverySource } from "./bootstrap.js";
-import { SYSTEM_RETENTION, type Corpus, type CrawlerProfile, type FrontierItem, type ResourceRow } from "./types.js";
+import { allSourcesWithPolicy, partitionSources, type DisabledSource, type DiscoverySource } from "./bootstrap.js";
+import { SOURCE_FAMILIES, type RotationCoverage } from "./rotation.js";
+import { SYSTEM_RETENTION, type Corpus, type CrawlerProfile, type FrontierItem, type ResourceRow, type ResourceState } from "./types.js";
+import { RESTING_STATES, RETRY_POLICY, classifyError, classifyHttp, lifecycleFromLegacy, retryAfterMs, type LifecycleState } from "./lifecycle.js";
+import { facetsOf, honestCategories, validateRecord } from "./facets.js";
+import { redactSecrets, redactValue } from "./redact.js";
+
+/** Compact one-line summary of a rotation run (fits the 500-char event detail). */
+export function formatCoverage(cov: RotationCoverage, added: number): string {
+  const t = cov.totals;
+  return `${cov.source}: queries=${t.queries} items=${t.items} new=${added} tlds=${t.distinctTlds} hosts=${t.distinctHosts}; ${cov.queries.map((q) => `${q.dimension}:${q.value} ${q.mime}→${q.items}${q.error ? "(err)" : ""}`).join("; ")}`;
+}
 import { learnedAdjustment, patternKey } from "./patterns.js";
 import type { NestedEntry } from "../metadata/extractors/archive.js";
 
@@ -68,6 +78,11 @@ export class AutonomousCrawler extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private ticking: Promise<unknown> | null = null;
   private lastBootstrapCheck = 0;
+  private sourceRounds = 0;
+  /** Sources disabled by host policy (never fetched); reported once at start. */
+  readonly disabledSources: DisabledSource[];
+  /** Per-run coverage of rotating discovery sources (most recent last, bounded). */
+  readonly rotationHistory: Array<RotationCoverage & { totals: RotationCoverage["totals"] & { newFrontierEntries: number } }> = [];
   readonly id: string;
   processed = 0;
   startedAt: number | null = null;
@@ -76,10 +91,12 @@ export class AutonomousCrawler extends EventEmitter {
     super();
     this.store = deps.store;
     const profile = deps.profile ?? ((process.env.CRAWLER_PROFILE as CrawlerProfile) || "generalist");
+    const policy = deps.sources ? partitionSources(deps.sources) : allSourcesWithPolicy();
+    this.disabledSources = policy.disabled;
     this.deps = {
       fetch: deps.fetch ?? ((url, headers) => safeFetch(url, { headers, maxBytes: Number(process.env.CRAWL_MAX_BYTES ?? 20 * 1024 * 1024), timeoutMs: 30_000 })),
       robots: deps.robots ?? robotsAllows,
-      sources: deps.sources ?? allSources(),
+      sources: policy.enabled,
       limits: { ...DEFAULT_LIMITS, ...deps.limits },
       concurrency: deps.concurrency ?? Number(process.env.CRAWL_CONCURRENCY ?? 4),
       hostDelayMs: deps.hostDelayMs ?? Number(process.env.HOST_DELAY_MS ?? 2000),
@@ -117,6 +134,9 @@ export class AutonomousCrawler extends EventEmitter {
     this.ticking = this.store
       .recoverOnStartup(this.deps.now())
       .then(() => this.store.event(null, "crawler_started", `${this.id} profile=${this.deps.profile} concurrency=${this.deps.concurrency}`))
+      // Older rows get lifecycle + coverage facets in the background (idempotent; safe with many replicas).
+      .then(() => void this.store.backfill().catch(() => undefined))
+      .then(() => this.reportDisabledSources())
       .catch((err) => log.error({ err }, "startup_recovery_failed"))
       .finally(loop);
   }
@@ -151,21 +171,40 @@ export class AutonomousCrawler extends EventEmitter {
   /** Process until nothing is due (tests / one-shot runs). */
   async drain(maxResources = 1000): Promise<number> {
     let total = 0;
+    let idleAt: number | null = null;
+    let idlePolls = 0;
     for (let i = 0; i < maxResources * 4 && total < maxResources; i++) {
       const n = await this.tick();
       await Promise.allSettled([...this.inFlight]);
       total += n;
       if (n === 0 && this.inFlight.size === 0) {
-        if (!(await this.store.dueCount(this.deps.now()))) break;
+        const t = this.deps.now();
+        if (!(await this.store.dueCount(t))) break;
+        // Due items exist but none is leasable (host back-off / politeness delay). With an injected clock that
+        // does not move, waiting cannot change that: stop after a few polls instead of spinning to the cap.
+        idlePolls = idleAt === t ? idlePolls + 1 : 0;
+        idleAt = t;
+        if (idlePolls >= 25) break;
         await new Promise((r) => setTimeout(r, Math.min(this.deps.hostDelayMs, 50)));
-      }
+      } else idlePolls = 0;
     }
     return total;
   }
 
+  /** Log + record an event for every discovery source disabled by host policy, explaining why. */
+  async reportDisabledSources(): Promise<void> {
+    for (const d of this.disabledSources) {
+      log.info({ source: d.id, reason: d.reason }, "bootstrap_source_disabled");
+      await this.store.event(null, "bootstrap_source_disabled", `${d.id}: ${d.reason}`);
+    }
+  }
+
   async runDueSources(now = this.deps.now(), force = false): Promise<number> {
     let added = 0;
-    for (const src of this.deps.sources) {
+    // Rotate which source family goes first so no family is always starved by the others' work.
+    const lead = SOURCE_FAMILIES[this.sourceRounds++ % SOURCE_FAMILIES.length];
+    const ordered = [...this.deps.sources].sort((a, b) => Number(b.family === lead) - Number(a.family === lead));
+    for (const src of ordered) {
       // Atomic claim: with many replicas, exactly one runs each source per interval.
       if (!(await this.store.claimSource(src.id, force ? 0 : src.intervalMs, now))) continue;
       try {
@@ -174,6 +213,12 @@ export class AutonomousCrawler extends EventEmitter {
         added += n;
         await this.store.recordSourceRun(src.id, n, null, now);
         await this.store.event(null, "bootstrap_source", `${src.id}: ${items.length} references, ${n} new`);
+        const cov = src.lastCoverage?.();
+        if (cov) {
+          this.rotationHistory.push({ ...cov, totals: { ...cov.totals, newFrontierEntries: n } });
+          if (this.rotationHistory.length > 50) this.rotationHistory.shift();
+          await this.store.event(null, "discovery_rotation", formatCoverage(cov, n));
+        }
       } catch (err) {
         await this.store.recordSourceRun(src.id, 0, (err as Error).message.slice(0, 200), now);
         await this.store.event(null, "bootstrap_source_failed", `${src.id}: ${(err as Error).message.slice(0, 200)}`);
@@ -190,13 +235,18 @@ export class AutonomousCrawler extends EventEmitter {
     const t0 = Date.now();
     const revisit = row.snapshot_count > 0;
     const pattern = patternKey(row.url.split("#")[0]);
+    const iso = () => new Date(this.deps.now()).toISOString();
+    const lc = new Progress(store, row.id, row.lifecycle ?? "leased");
+    // Scheduling state while a retry is pending: revisits stay searchable with their last good snapshot.
+    const resting: ResourceState = row.duplicate_of || row.indexed_at ? "indexed" : revisit ? "unavailable" : "queued";
     try {
       const rb = await this.deps.robots(row.url).catch((err) => {
         if (err instanceof FetchBlockedError) throw err;
         return { allowed: null, crawlDelay: null, sitemaps: [] as string[] };
       });
       if (rb.allowed === false) {
-        await store.finish(row.id, "skipped", now + 30 * DAY, { last_error: "robots.txt disallow" });
+        await lc.to("restricted", "robots_disallow", "robots.txt disallows this URL for our user agent; not fetched");
+        await store.finish(row.id, "skipped", now + 30 * DAY, { last_error: "robots.txt disallow", failures: 0 });
         await store.event(row.id, "robots_disallowed");
         return;
       }
@@ -212,23 +262,40 @@ export class AutonomousCrawler extends EventEmitter {
       if (row.last_modified) conditional["if-modified-since"] = row.last_modified;
       await store.event(row.id, revisit ? "revisit" : "retrieve", `${this.id}: ${row.url}`);
       let res = await this.deps.fetch(row.url, conditional);
-      await store.setStage(row.id, { retrieved_at: new Date(this.deps.now()).toISOString(), http_status: res.status, final_url: res.finalUrl });
-      await store.event(row.id, "retrieved", `HTTP ${res.status}, ${res.body.length} bytes${res.redirects.length ? `, ${res.redirects.length} redirect(s)` : ""}`);
+      const transport = `HTTP ${res.status}, ${res.body.length} bytes${res.truncated ? " (truncated at byte cap)" : ""}${res.redirects.length ? `, ${res.redirects.length} redirect(s)` : ""}`;
+      await lc.to("fetched", `http_${res.status}`, transport, { retrieved_at: iso(), http_status: res.status, final_url: res.finalUrl });
+      await store.event(row.id, "retrieved", transport);
+      const outcome = classifyHttp(res.status);
 
-      if (res.status === 304) {
+      if (outcome === "not_modified") {
         await store.hostResult(row.host, true, 304, now);
         const unchanged = row.unchanged_count + 1;
-        await store.finish(row.id, "indexed", now + this.revisitInterval(row.change_count, unchanged), { unchanged_count: unchanged });
+        await store.finish(row.id, "indexed", now + this.revisitInterval(row.change_count, unchanged), { unchanged_count: unchanged, failures: 0 });
+        await lc.to(row.duplicate_of ? "superseded" : "indexed", "not_modified", "conditional request: unchanged since last snapshot");
         await store.event(row.id, "not_modified", "conditional request: unchanged since last snapshot");
         return;
       }
       if (new URL(res.finalUrl).origin !== new URL(row.url.split("#")[0]).origin) {
         const rb2 = await this.deps.robots(res.finalUrl).catch(() => ({ allowed: null }));
         if (rb2.allowed === false) {
-          await store.finish(row.id, "skipped", now + 30 * DAY, { last_error: `robots.txt disallows redirect target ${res.finalUrl}` });
+          await lc.to("restricted", "robots_disallow_redirect", `redirect target ${res.finalUrl} is disallowed by its robots.txt`);
+          await store.finish(row.id, "skipped", now + 30 * DAY, { last_error: `robots.txt disallows redirect target ${res.finalUrl}`, failures: 0 });
           return;
         }
       }
+
+      // Transient server failures are retried with backoff; the error page is not evidence of the resource.
+      const failures = (row.failures ?? 0) + 1;
+      if (outcome === "retryable" && failures < RETRY_POLICY.maxAttempts) {
+        const wait = RETRY_POLICY.backoffMs(failures, retryAfterMs(res.headers["retry-after"], now));
+        await store.hostResult(row.host, false, res.status, now);
+        await store.recordPattern(pattern, row.host, { indexed: false, failed: true, fields: 0, categories: 0, ms: Date.now() - t0 });
+        await lc.to("failed_retryable", `http_${res.status}`, `attempt ${failures}/${RETRY_POLICY.maxAttempts}; retry in ${Math.round(wait / 60_000)} min`);
+        await store.finish(row.id, resting, now + wait, { failures, last_error: `HTTP ${res.status}` });
+        await store.event(row.id, "retry_scheduled", `HTTP ${res.status}: attempt ${failures}/${RETRY_POLICY.maxAttempts}, next in ${Math.round(wait / 60_000)} min`);
+        return;
+      }
+      const errorResponse = res.status >= 400;
 
       let shared = new Map<string, unknown>();
       let record = await analyzeResponse(res, { sourceType: "url", enrich: this.deps.enrich && !revisit, onShared: (s) => (shared = s) });
@@ -243,29 +310,62 @@ export class AutonomousCrawler extends EventEmitter {
           await store.event(row.id, "rendered", "JS-dependent page rendered with headless Chromium");
         }
       }
-      await store.setStage(row.id, { inspected_at: new Date(this.deps.now()).toISOString(), kind: record.kind });
-      await store.event(row.id, "inspected", `format ${record.kind} (${record.mimeType ?? "unknown"}), extractors: ${record.processing.extractors.map((e) => e.id.split("@")[0]).join(",")}`);
+      // An error page went through transport-level extractors only: the resource's content was not inspected.
+      if (errorResponse) await store.setStage(row.id, { kind: record.kind, mime: record.mimeType });
+      const extractors = record.processing.extractors.map((e) => e.id.split("@")[0]).join(",");
+      await store.event(row.id, "inspected", `${errorResponse ? "error response; transport-level only — " : ""}format ${record.kind} (${record.mimeType ?? "unknown"}), extractors: ${extractors}`);
       await store.recordExtractorRuns(record.processing.extractors);
-
-      const unavailable = res.status >= 400;
-      await store.hostResult(row.host, !unavailable || res.status === 404 || res.status === 410, res.status, now);
-
+      await store.hostResult(row.host, !errorResponse || res.status === 404 || res.status === 410, res.status, now);
       const prev = await store.latestSnapshot(row.id);
+
+      if (errorResponse) {
+        const final: LifecycleState = outcome === "retryable" ? "permanently_failed" : outcome === "restricted" ? "restricted" : "unavailable";
+        const reason = outcome === "retryable" ? `http_${res.status}_retries_exhausted` : `http_${res.status}`;
+        const wasAvailable = revisit && row.http_status !== null && row.http_status < 400;
+        const change = res.status === 404 || res.status === 410 ? "removed" : outcome === "restricted" ? "access_restricted" : "status_changed";
+        if (wasAvailable) await lc.to("change_detected", change, `HTTP ${row.http_status} → ${res.status} since the snapshot of ${prev?.fetched_at ?? "an earlier visit"}`);
+        await addCrawlerObservations(record, row, { revisit, changedFields: wasAvailable ? [`4.httpStatus`] : null, prevFetchedAt: prev?.fetched_at ?? null, dupOf: null, store, crawlerId: this.id, pattern });
+        redactRecord(record);
+        record.categories = honestCategories(coverage(record.fields, record.kind, record.processing.extractors, record.httpStatus, record.format?.id), record.fields, record.httpStatus);
+        await store.saveSnapshot(row.id, record, { text: "", changedFields: wasAvailable ? ["4.httpStatus"] : null, index: false });
+        await store.finish(row.id, "unavailable", now + 7 * DAY, {
+          indexed_at: null, title: record.title, description: record.description, content_hash: record.contentHash, etag: res.headers.etag ?? null, last_modified: res.headers["last-modified"] ?? null,
+          change_count: row.change_count + (wasAvailable ? 1 : 0), unchanged_count: 0, duplicate_of: null, last_error: `HTTP ${res.status}`, failures: 0, field_count: record.fields.length, validation_issues: null,
+        });
+        await store.setFacets(row.id, facetsOf(record), iso());
+        await lc.to(final, reason, `${transport}; not indexed`);
+        if (wasAvailable) await store.event(row.id, change, `HTTP ${row.http_status} → ${res.status}; removed from the search index`);
+        await store.recordPattern(pattern, row.host, { indexed: false, failed: true, fields: record.fields.length, categories: 0, ms: Date.now() - t0 });
+        await store.event(row.id, "not_indexed", `${final} (${reason})`);
+        this.processed++;
+        this.emit("processed", { id: row.id, url: row.url, state: "unavailable", lifecycle: lc.cur });
+        return;
+      }
+
+      await lc.to("inspected", record.kind, `format ${record.kind} (${record.mimeType ?? "unknown"}); extractors: ${extractors}`, { inspected_at: iso(), kind: record.kind, mime: record.mimeType });
+      const contentChanged = Boolean(prev && prev.content_hash !== record.contentHash);
+      const restored = revisit && row.http_status !== null && row.http_status >= 400;
       let changedFields: string[] | null = null;
-      if (prev && prev.content_hash !== record.contentHash) changedFields = diffFields(await store.observationsFor(prev.id), record.fields);
+      if (prev && contentChanged) changedFields = diffFields(await store.observationsFor(prev.id), record.fields);
+      if (contentChanged || restored) await lc.to("change_detected", restored ? "restored" : "content_changed", restored ? `HTTP ${row.http_status} → ${res.status}` : `content hash changed; fields: ${changedFields?.join(", ") || "(content bytes only)"}`);
       const dupOf = record.contentHash ? await store.linkDuplicates(row.id, record.contentHash) : null;
 
       await addCrawlerObservations(record, row, { revisit, changedFields, prevFetchedAt: prev?.fetched_at ?? null, dupOf, store, crawlerId: this.id, pattern });
-      record.categories = coverage(record.fields, record.kind, record.processing.extractors, record.httpStatus);
-      await store.setStage(row.id, { extracted_at: new Date(this.deps.now()).toISOString(), field_count: record.fields.length, extractor_errors: record.quality.extractorErrors.length });
-
       const text = String(shared.get("contentText") ?? shared.get("plainText") ?? (["text", "csv", "json", "xml", "feed"].includes(record.kind) ? res.body.toString("utf8") : ""));
       const ocr = shared.get("ocrText");
-      const index = !unavailable && !dupOf;
-      await store.saveSnapshot(row.id, record, { text: ocr ? `${text}\n${ocr}` : text, changedFields, index });
+      const cleanText = redactRecord(record, ocr ? `${text}\n${ocr}` : text);
+      record.categories = honestCategories(coverage(record.fields, record.kind, record.processing.extractors, record.httpStatus, record.format?.id), record.fields, record.httpStatus);
+      await lc.to("extracted", null, `${record.fields.length} observations; ${record.quality.extractorErrors.length} extractor error(s)`, { extracted_at: iso(), field_count: record.fields.length, extractor_errors: record.quality.extractorErrors.length });
+
+      const issues = validateRecord(record, res);
+      record.fields.push(crawlerField(record, C.quality, "validationIssues", issues, "crawler record validation", "declared vs sniffed format, truncation, extractor failures, schema types, empty or content-free records"));
+      await lc.to("validated", issues.length ? "issues" : "clean", issues.join(", ") || "no issues");
+
+      const index = !dupOf;
+      await store.saveSnapshot(row.id, record, { text: cleanText, changedFields, index });
       const changed = Boolean(prev && changedFields);
-      await store.finish(row.id, unavailable ? "unavailable" : "indexed", now + (unavailable ? 7 * DAY : this.revisitInterval(row.change_count + (changed ? 1 : 0), changed ? 0 : row.unchanged_count + (prev ? 1 : 0))), {
-        indexed_at: index ? new Date(this.deps.now()).toISOString() : null,
+      await store.finish(row.id, "indexed", now + this.revisitInterval(row.change_count + (changed ? 1 : 0), changed ? 0 : row.unchanged_count + (prev ? 1 : 0)), {
+        indexed_at: index ? iso() : null,
         title: record.title,
         description: record.description,
         content_hash: record.contentHash,
@@ -274,45 +374,78 @@ export class AutonomousCrawler extends EventEmitter {
         change_count: row.change_count + (changed ? 1 : 0),
         unchanged_count: changed ? 0 : row.unchanged_count + (prev && !changedFields ? 1 : 0),
         duplicate_of: dupOf,
-        last_error: unavailable ? `HTTP ${res.status}` : null,
+        last_error: null,
+        failures: 0,
+        field_count: record.fields.length,
+        validation_issues: issues.join(","),
       });
+      await store.setFacets(row.id, facetsOf(record), iso());
+      await lc.to(dupOf ? "superseded" : "indexed", dupOf ? `duplicate_of:${dupOf}` : changed ? "content_changed" : restored ? "restored" : revisit ? "revisit" : "first_index", `${record.fields.length} observations`);
       const observedCats = record.categories.filter((c) => c.state === "observed").length;
-      await store.recordPattern(pattern, row.host, { indexed: index, failed: unavailable, fields: record.fields.length, categories: observedCats, ms: Date.now() - t0 });
+      await store.recordPattern(pattern, row.host, { indexed: index, failed: false, fields: record.fields.length, categories: observedCats, ms: Date.now() - t0 });
       if (dupOf) await store.event(row.id, "duplicate", `identical bytes to resource #${dupOf}; not indexed separately`);
       if (changed) await store.event(row.id, "changed", `fields changed: ${changedFields!.join(", ") || "(content bytes only)"}`);
       await store.event(row.id, index ? "indexed" : "not_indexed", `${record.fields.length} observations, ${observedCats}/41 categories observed`);
 
       const nested = shared.get("archiveEntries") as NestedEntry[] | undefined;
-      if (nested?.length && !unavailable) await this.processArchiveEntries(row, res, nested);
+      if (nested?.length) await this.processArchiveEntries(row, res, nested);
 
       // ---------------- path 2: discovery processing
-      if (!unavailable && !dupOf) await this.discover(row, record, shared, now);
+      if (!dupOf) await this.discover(row, record, shared, now);
       this.processed++;
-      this.emit("processed", { id: row.id, url: row.url, state: index ? "indexed" : unavailable ? "unavailable" : "duplicate" });
+      this.emit("processed", { id: row.id, url: row.url, state: index ? "indexed" : "duplicate", lifecycle: lc.cur });
     } catch (err) {
       const msg = (err as Error).message.slice(0, 300);
-      const blocked = err instanceof FetchBlockedError || /EGRESS_BLOCKED/.test(msg);
+      if (RESTING_STATES.has(lc.cur)) {
+        // Already settled (e.g. discovery failed after indexing): the resource's own outcome stands.
+        await store.event(row.id, "post_processing_error", msg).catch(() => undefined);
+        return;
+      }
+      const cls = classifyError(err);
+      const failures = (row.failures ?? 0) + 1;
       await store.hostResult(row.host, false, null, now).catch(() => undefined);
       await store.recordPattern(pattern, row.host, { indexed: false, failed: true, fields: 0, categories: 0, ms: Date.now() - t0 }).catch(() => undefined);
-      const retry = !blocked && row.attempts < 3;
-      await store.finish(row.id, retry ? "queued" : blocked ? "skipped" : "failed", now + (retry ? 15 * 60_000 * row.attempts : 30 * DAY), { last_error: msg }).catch(() => undefined);
-      await store.event(row.id, retry ? "retrieve_failed_retrying" : "failed", msg).catch(() => undefined);
+      const settle = async (to: LifecycleState, reason: string, state: ResourceState, due: number, event: string) => {
+        await lc.to(to, reason, msg).catch((e) => store.event(row.id, "lifecycle_error", (e as Error).message.slice(0, 300)));
+        await store.finish(row.id, state, due, { last_error: msg, failures: to === "skipped" ? 0 : failures }).catch(() => undefined);
+        await store.event(row.id, event, `${reason}: ${msg}`).catch(() => undefined);
+      };
+      if (cls.kind === "policy") await settle("skipped", cls.reason, "skipped", now + 30 * DAY, "skipped");
+      else if (cls.kind === "retryable" && failures < RETRY_POLICY.maxAttempts) await settle("failed_retryable", cls.reason, resting, now + RETRY_POLICY.backoffMs(failures), "retrieve_failed_retrying");
+      else await settle("permanently_failed", cls.kind === "retryable" ? `${cls.reason}_retries_exhausted` : cls.reason, "failed", now + 30 * DAY, "failed");
     }
   }
 
   private async processArchiveEntries(parent: ResourceRow, res: SafeResponse, entries: NestedEntry[]): Promise<void> {
     for (const e of entries) {
       const url = `${res.finalUrl}#entry=${encodeURIComponent(e.name)}`;
-      await this.store.enqueue([{ url, priority: 0, depth: parent.depth + 1, via: "archive_entry", purpose: "contained", parentId: parent.id, relation: "has_part", scope: "resource" }]);
-      const child = (await this.store.byUrl(url))!;
-      const virtual: SafeResponse = { ...res, requestedUrl: url, finalUrl: url, headers: {}, body: e.body, truncated: false, redirects: [], encodedBytes: e.body.length };
-      let shared = new Map<string, unknown>();
-      const rec = await analyzeResponse(virtual, { sourceType: "url", enrich: false, filename: e.name, onShared: (s) => (shared = s) });
-      const iso = new Date(this.deps.now()).toISOString();
-      await this.store.saveSnapshot(child.id, rec, { text: String(shared.get("contentText") ?? shared.get("plainText") ?? (["csv", "json", "text", "xml"].includes(rec.kind) ? e.body.toString("utf8") : "")), index: true });
-      // setStage (not finish): finishing would release the host lease the parent still holds.
-      await this.store.setStage(child.id, { state: "indexed", due_at: Number.MAX_SAFE_INTEGER, lease_until: null, retrieved_at: iso, inspected_at: iso, extracted_at: iso, indexed_at: iso, kind: rec.kind, title: rec.title ?? e.name, content_hash: rec.contentHash, field_count: rec.fields.length });
-      await this.store.event(child.id, "indexed", `archive entry of #${parent.id} (${e.size} bytes)`);
+      try {
+        await this.store.enqueue([{ url, priority: 0, depth: parent.depth + 1, via: "archive_entry", purpose: "contained", parentId: parent.id, relation: "has_part", scope: "resource" }]);
+        const child = (await this.store.byUrl(url))!;
+        const lc = new Progress(this.store, child.id, child.lifecycle ?? lifecycleFromLegacy(child));
+        const why = `archive_entry_of:#${parent.id}`;
+        // The bytes arrived with the parent's response, under the parent's lease.
+        await lc.to(["leased", "fetched"], why, `${e.size} bytes from ${e.name}`);
+        const virtual: SafeResponse = { ...res, requestedUrl: url, finalUrl: url, headers: {}, body: e.body, truncated: false, redirects: [], encodedBytes: e.body.length };
+        let shared = new Map<string, unknown>();
+        const rec = await analyzeResponse(virtual, { sourceType: "url", enrich: false, filename: e.name, onShared: (s) => (shared = s) });
+        await lc.to("inspected", rec.kind, `format ${rec.kind}`);
+        const text = redactRecord(rec, String(shared.get("contentText") ?? shared.get("plainText") ?? (["csv", "json", "text", "xml"].includes(rec.kind) ? e.body.toString("utf8") : "")));
+        rec.categories = honestCategories(rec.categories, rec.fields, rec.httpStatus);
+        await lc.to("extracted", null, `${rec.fields.length} observations`);
+        const issues = validateRecord(rec, virtual);
+        rec.fields.push(crawlerField(rec, C.quality, "validationIssues", issues, "crawler record validation"));
+        await lc.to("validated", issues.length ? "issues" : "clean", issues.join(", ") || "no issues");
+        const iso = new Date(this.deps.now()).toISOString();
+        await this.store.saveSnapshot(child.id, rec, { text, index: true });
+        // setStage (not finish): finishing would release the host lease the parent still holds.
+        await this.store.setStage(child.id, { state: "indexed", due_at: Number.MAX_SAFE_INTEGER, lease_until: null, retrieved_at: iso, inspected_at: iso, extracted_at: iso, indexed_at: iso, kind: rec.kind, mime: rec.mimeType, title: rec.title ?? e.name, content_hash: rec.contentHash, field_count: rec.fields.length, validation_issues: issues.join(",") });
+        await this.store.setFacets(child.id, facetsOf(rec), iso);
+        await lc.to("indexed", why);
+        await this.store.event(child.id, "indexed", `archive entry of #${parent.id} (${e.size} bytes)`);
+      } catch (err) {
+        await this.store.event(parent.id, "archive_entry_failed", `${e.name}: ${(err as Error).message.slice(0, 200)}`).catch(() => undefined);
+      }
     }
   }
 
@@ -386,6 +519,8 @@ async function addCrawlerObservations(
   const add = (category: number, field: string, value: unknown, method: string, evidence?: string) => record.fields.push(crawlerField(record, category, field, value, method, evidence));
   const events = await o.store.eventsFor(row.id, 20);
   add(C.audit, "crawlerEvents", events.slice(0, 10).map((e) => ({ ts: e.ts, type: e.type })), "crawler event log", "this system's own retrieval/processing history — not the source's logs");
+  const steps = await o.store.transitionsFor(row.id, 12);
+  add(C.audit, "lifecycleHistory", steps.reverse().map((t) => ({ ts: t.ts, from: t.from, to: t.to, reason: t.reason })), "crawler item state machine", "this system's own lifecycle transitions for this resource (so far in this round) — not the source's history");
   add(C.operational, "crawlerState", { crawler: o.crawlerId, discoveredVia: row.via, purpose: row.purpose, depth: row.depth, attempts: row.attempts, discoveredAt: row.discovered_at, previousRetrieval: o.prevFetchedAt, pattern: o.pattern }, "crawler frontier state");
   add(C.retention, "systemRetentionPolicy", SYSTEM_RETENTION, "omnispider retention configuration", "the collecting system's own rules, distinct from any source-declared retention");
   add(C.provenance, "discoveredVia", row.via, "crawler frontier");
@@ -396,4 +531,52 @@ async function addCrawlerObservations(
     const other = await o.store.get(o.dupOf);
     if (other) record.relationships.push({ type: "same_as", target: other.url, evidence: "identical SHA-256 content hash", method: "crawler duplicate detection", status: "observed" });
   }
+}
+
+/** Tracks one resource's lifecycle through guarded, recorded transitions. */
+class Progress {
+  constructor(
+    private store: Corpus,
+    private id: number,
+    public cur: LifecycleState,
+  ) {}
+
+  async to(path: LifecycleState | LifecycleState[], reason: string | null = null, detail: string | null = null, patch?: Partial<Omit<ResourceRow, "id">>): Promise<void> {
+    this.cur = await this.store.transition(this.id, this.cur, path, reason, detail, patch);
+  }
+}
+
+/**
+ * Removes credential-like strings from field values, evidence, title/description and the search text, and
+ * records how many were found (category 39, counts only). Returns the cleaned text.
+ */
+function redactRecord(record: ResourceRecord, text = ""): string {
+  const counts: Record<string, number> = {};
+  const merge = (c: Record<string, number>) => Object.entries(c).forEach(([k, n]) => (counts[k] = (counts[k] ?? 0) + n));
+  for (const f of record.fields) {
+    const v = redactValue(f.value);
+    if (v.total) {
+      f.value = v.value;
+      f.masked = true;
+      merge(v.counts);
+    }
+    if (f.evidence) {
+      const e = redactSecrets(f.evidence);
+      if (e.total) {
+        f.evidence = e.text;
+        f.masked = true;
+        merge(e.counts);
+      }
+    }
+  }
+  if (record.title) record.title = redactSecrets(record.title).text;
+  if (record.description) record.description = redactSecrets(record.description).text;
+  const t = redactSecrets(text);
+  merge(t.counts);
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  record.fields.push({
+    ...crawlerField(record, C.privacy, "credentialLikeStrings", { total, byType: counts }, "credential pattern detection (values withheld)", "credential-like strings are redacted before storage and never searchable; counts only"),
+    masked: true,
+  });
+  return t.text;
 }

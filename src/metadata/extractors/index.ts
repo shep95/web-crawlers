@@ -10,10 +10,18 @@ import { httpExtractor } from "./http.js";
 import { audioVideoExtractor, imageExtractor } from "./media.js";
 import { emailExtractor, privacyExtractor, textExtractor } from "./text.js";
 import { textIntelligenceExtractor } from "./text-intel.js";
+import { ebmlExtractor } from "./ebml.js";
+import { epubExtractor } from "./epub.js";
+import { geoExtractor } from "./geo.js";
+import { opaqueBinaryExtractor, scientificExtractor } from "./scientific.js";
+import { configExtractor, dataLinesExtractor, packageManifestExtractor, sourceCodeExtractor } from "./structured.js";
+import { streamManifestExtractor, subtitleExtractor } from "./timed-media.js";
+import { webArchiveExtractor } from "./web-archive.js";
 
 /**
  * Extractor plugin registry. To add a format: implement `Extractor`
- * (see ../extractor.ts), declare kinds + categories, and append it here.
+ * (see ../extractor.ts), declare kinds (or detected `formats`, see ../formats.ts)
+ * + categories, add/refresh the format's entry in ../formats.ts, and append it here.
  */
 export const EXTRACTORS: Extractor[] = [
   httpExtractor,
@@ -30,6 +38,18 @@ export const EXTRACTORS: Extractor[] = [
   textExtractor,
   emailExtractor,
   zipArchiveExtractor,
+  webArchiveExtractor,
+  subtitleExtractor,
+  streamManifestExtractor,
+  ebmlExtractor,
+  scientificExtractor,
+  opaqueBinaryExtractor,
+  geoExtractor,
+  epubExtractor,
+  dataLinesExtractor,
+  configExtractor,
+  packageManifestExtractor,
+  sourceCodeExtractor,
   privacyExtractor,
   textIntelligenceExtractor,
   dnsExtractor,

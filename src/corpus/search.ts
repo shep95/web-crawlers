@@ -262,16 +262,18 @@ export async function resourceDetail(store: Corpus, id: number) {
   const r = await store.get(id);
   if (!r) return null;
   const snap = await store.latestSnapshot(id);
-  const [fields, rec, relationships, snapshots, events] = await Promise.all([
+  const [fields, rec, relationships, snapshots, events, transitions] = await Promise.all([
     snap ? store.observationsFor(snap.id) : Promise.resolve([]),
     snap ? store.snapshotRecord(snap.id) : Promise.resolve(null),
     store.relationshipsOf(id),
     store.snapshots(id),
     store.eventsFor(id, 50),
+    store.transitionsFor(id, 50),
   ]);
   return {
     resource: r,
     stages: { discovered: r.discovered_at, retrieved: r.retrieved_at, inspected: r.inspected_at, extracted: r.extracted_at, indexed: r.indexed_at, state: r.state, lastError: r.last_error },
+    lifecycle: { state: r.lifecycle, since: r.lifecycle_at, reason: r.lifecycle_reason, consecutiveFailures: r.failures ?? 0, validationIssues: r.validation_issues ? r.validation_issues.split(",") : r.validation_issues === "" ? [] : null, transitions },
     categories: rec?.categories ?? CATEGORIES.map((c) => ({ id: c.id, key: c.key, name: c.name, state: "unavailable", fieldCount: 0, note: "not yet retrieved" })),
     quality: rec?.quality ?? null,
     processing: rec?.processing ?? null,

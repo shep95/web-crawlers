@@ -86,6 +86,8 @@ export const audioVideoExtractor: Extractor = {
   categories: [C.audio, C.video, C.technical, C.descriptive, C.identifiers, C.rights, C.temporal, C.accessibility, C.structural, C.integrity],
   timeoutMs: 6000,
   async run(ctx) {
+    // WebM/Matroska are read by the dedicated EBML walker (stops before media clusters).
+    if (ctx.format === "webm" || ctx.format === "mkv") return;
     const { parseBuffer } = await import("music-metadata");
     const meta = await parseBuffer(new Uint8Array(ctx.response.body), { mimeType: ctx.sniffedType, size: ctx.response.body.length }, { duration: false, skipCovers: true });
     const f = meta.format;
