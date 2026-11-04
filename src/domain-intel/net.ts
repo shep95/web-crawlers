@@ -18,7 +18,7 @@ export interface HttpResult {
 export interface TlsResult {
   host: string; port: number; ok: boolean; error?: string; protocol?: string | null; cipher?: string | null; alpn?: string | null;
   authorized?: boolean; authorizationError?: string | null;
-  cert?: { subject: string; issuer: string; validFrom: string; validTo: string; san: string[]; serial: string; fingerprint256: string; bits?: number; selfSigned: boolean; chainDepth: number };
+  cert?: { subject: string; issuer: string; validFrom: string; validTo: string; san: string[]; serial: string; fingerprint256: string; bits?: number; keyType: "EC" | "RSA" | null; curve: string | null; selfSigned: boolean; chainDepth: number };
 }
 export interface TcpResult { host: string; port: number; open: boolean; banner?: string; error?: string; ms: number }
 export interface IntelNet {
@@ -26,7 +26,7 @@ export interface IntelNet {
   http(url: string, opts?: { method?: "GET" | "HEAD"; maxBytes?: number; headers?: Record<string, string>; follow?: boolean; timeoutMs?: number }): Promise<HttpResult>;
   json<T>(url: string, timeoutMs?: number): Promise<T | null>;
   tls(host: string, opts?: { port?: number; minVersion?: "TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3"; maxVersion?: "TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3"; timeoutMs?: number }): Promise<TlsResult>;
-  tcp(host: string, port: number, opts?: { readBanner?: boolean; send?: string; timeoutMs?: number }): Promise<TcpResult>;
+  tcp(host: string, port: number, opts?: { readBanner?: boolean; send?: string; smtpEhlo?: string; timeoutMs?: number }): Promise<TcpResult>;
 }
 
 const DOH = "https://cloudflare-dns.com/dns-query";
@@ -39,7 +39,11 @@ function fmtName(o: Record<string, string | string[]> | undefined): string {
 }
 
 /** Public address for a hostname, or throws (private/loopback/link-local answers are refused). */
+/** Tests only: lets the adapter reach loopback fixtures. Never set in production code. */
+export const __intelTesting = { allowLoopback: false };
+
 async function publicAddress(host: string): Promise<string> {
+  if (__intelTesting.allowLoopback && (host === "127.0.0.1" || host === "localhost")) return "127.0.0.1";
   if (/^[\d.]+$/.test(host) || host.includes(":")) {
     if (!isPublicAddress(host)) throw new Error("EGRESS_BLOCKED: non-public address");
     return host;
@@ -97,7 +101,7 @@ export const liveNet: IntelNet = {
       };
       const socket = tlsConnect({ host: address, port, servername: host, rejectUnauthorized: false, ALPNProtocols: ["h2", "http/1.1"], minVersion: opts.minVersion, maxVersion: opts.maxVersion, timeout: opts.timeoutMs ?? 8000 });
       socket.once("secureConnect", () => {
-        const c = socket.getPeerCertificate(true) as PeerCertificate & { issuerCertificate?: PeerCertificate; bits?: number };
+        const c = socket.getPeerCertificate(true) as PeerCertificate & { issuerCertificate?: PeerCertificate; bits?: number; asn1Curve?: string; nistCurve?: string; modulus?: string };
         let depth = 0;
         for (let x: (PeerCertificate & { issuerCertificate?: PeerCertificate }) | undefined = c; x && depth < 10; x = x.issuerCertificate === x ? undefined : x.issuerCertificate) depth++;
         const subject = fmtName(c.subject as unknown as Record<string, string>), issuer = fmtName(c.issuer as unknown as Record<string, string>);
@@ -107,7 +111,7 @@ export const liveNet: IntelNet = {
           cert: c && c.valid_to ? {
             subject, issuer, validFrom: new Date(c.valid_from).toISOString(), validTo: new Date(c.valid_to).toISOString(),
             san: (c.subjectaltname ?? "").split(/,\s*/).filter(Boolean).map((s) => s.replace(/^DNS:/, "")), serial: c.serialNumber,
-            fingerprint256: c.fingerprint256, bits: c.bits, selfSigned: subject === issuer, chainDepth: depth,
+            fingerprint256: c.fingerprint256, bits: c.bits, keyType: c.asn1Curve || c.nistCurve ? "EC" : c.modulus ? "RSA" : null, curve: c.nistCurve ?? c.asn1Curve ?? null, selfSigned: subject === issuer, chainDepth: depth,
           } : undefined,
         }, socket);
       });
@@ -133,13 +137,26 @@ export const liveNet: IntelNet = {
         resolve({ ...r, ms: Date.now() - t0 });
       };
       s.setTimeout(opts.timeoutMs ?? 4000);
+      let ehloSent = false;
+      const clean = (t: string) => t.slice(0, 2048).replace(/[^\x20-\x7e\r\n]/g, "·").trim();
       s.once("connect", () => {
         if (opts.send) s.write(opts.send);
-        if (!opts.readBanner && !opts.send) end({ host, port, open: true });
+        if (!opts.readBanner && !opts.send && !opts.smtpEhlo) end({ host, port, open: true });
       });
       s.on("data", (d) => {
         banner += d.toString("latin1");
-        if (banner.length > 512 || /\r?\n$/.test(banner)) end({ host, port, open: true, banner: banner.slice(0, 512).replace(/[^\x20-\x7e\r\n]/g, "·").trim() });
+        if (opts.smtpEhlo) {
+          // RFC 5321: wait for the complete 220 greeting, then EHLO, then the final "250 " line of the reply.
+          if (!ehloSent && /(^|\n)220 [^\n]*\n/.test(banner)) {
+            ehloSent = true;
+            s.write(`EHLO ${opts.smtpEhlo}\r\n`);
+          } else if (ehloSent && /(^|\n)(250|5\d\d) [^\n]*\n/.test(banner.slice(banner.indexOf("\n") + 1))) {
+            s.write("QUIT\r\n");
+            end({ host, port, open: true, banner: clean(banner) });
+          } else if (banner.length > 8192) end({ host, port, open: true, banner: clean(banner) });
+          return;
+        }
+        if (banner.length > 512 || /\r?\n$/.test(banner)) end({ host, port, open: true, banner: clean(banner).slice(0, 512) });
       });
       s.once("timeout", () => end(banner ? { host, port, open: true, banner: banner.slice(0, 512).trim() } : { host, port, open: s.readyState === "open", error: "timeout" }));
       s.once("error", (e) => end({ host, port, open: false, error: (e as NodeJS.ErrnoException).code ?? e.message }));

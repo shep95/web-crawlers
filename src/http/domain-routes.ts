@@ -3,10 +3,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { normalizeTarget, runDomainIntel, verificationValue, type IntelReport } from "../domain-intel/engine.js";
+import { normalizeTarget, runDomainIntel, scopeRootOf, verificationValue, type IntelReport } from "../domain-intel/engine.js";
 import { liveNet, type IntelNet } from "../domain-intel/net.js";
 import { FAMILIES, RULES } from "../domain-intel/rules.js";
-import { registrable } from "../domain-intel/collect.js";
 
 const Q = z.object({ domain: z.string().trim().min(3).max(300), fresh: z.enum(["1", "true"]).optional() });
 
@@ -48,7 +47,7 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
     const r = Q.pick({ domain: true }).safeParse(req.query);
     const host = r.success ? normalizeTarget(r.data.domain) : null;
     if (!host) return reply.code(400).send({ error: "INVALID_DOMAIN", message: "Enter a public domain name such as example.org." });
-    const domain = registrable(host);
+    const domain = scopeRootOf(host);
     return { domain, record: `_void-verify.${domain}`, type: "TXT", value: verificationValue(domain, secret), effect: "Publishing this TXT record proves control of the domain and enables owner-only checks (exposed files, legacy TLS, CORS origin test, open-redirect test, service ports on non-shared infrastructure). Remove it to return to passive mode." };
   });
 

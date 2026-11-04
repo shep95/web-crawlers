@@ -250,8 +250,9 @@ export async function collectDomain(net: IntelNet, domain: string, opts: { autho
   const mx0 = mxs.map((m) => m.split(/\s+/)).sort((a, b) => Number(a[0]) - Number(b[0]))[0]?.[1];
   if (mx0 && !facts.mail.nullMx && opts.budget()) {
     const host = strip(mx0);
-    const r = await net.tcp(host, 25, { readBanner: true, send: "EHLO void-intel.invalid\r\n", timeoutMs: 6000 });
-    facts.mail.smtp = { host, banner: r.banner?.split(/\r?\n/)[0]?.slice(0, 200) ?? null, starttls: r.banner ? /STARTTLS/i.test(r.banner) : null, error: r.open ? undefined : r.error ?? "no answer (outbound port 25 is often blocked by hosting networks)" };
+    const r = await net.tcp(host, 25, { smtpEhlo: "void-intel.invalid", timeoutMs: 8000 });
+    const ehloDone = !!r.banner && /(^|\n)250 /.test(r.banner);
+    facts.mail.smtp = { host, banner: r.banner?.split(/\r?\n/)[0]?.slice(0, 200) ?? null, starttls: ehloDone ? /^250[- ]STARTTLS/im.test(r.banner!) : null, error: r.open ? undefined : r.error ?? "no answer (outbound port 25 is often blocked by hosting networks)" };
   }
   return facts;
 }

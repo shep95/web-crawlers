@@ -242,3 +242,71 @@ describe("domain intelligence — HTTP API", () => {
     await app.close();
   }, 30_000);
 });
+
+describe("domain intelligence — regressions from the first live run", () => {
+  it("scopes a tenant on a shared platform to the host, never the platform's other customers (00-02)", async () => {
+    const host = "void-fixture.up.railway.app";
+    const net = fixtureNet({
+      dns: { [`${host}|A`]: ["66.33.22.1"], "other-customer.up.railway.app|A": ["66.33.22.2"] },
+      json: { [`https://crt.sh/?q=${encodeURIComponent("%." + host)}&output=json&exclude=expired&deduplicate=Y`]: [{ name_value: `${host}\nother-customer.up.railway.app`, issuer_name: "O=Let's Encrypt", not_before: "2026-10-01", not_after: "2027-01-01" }] },
+      http: { [`https://${host}/`]: { status: 200, headers: { "content-type": "text/html", server: "railway-edge" }, body: "<html><head><title>t</title></head><body><a href='https://other-customer.up.railway.app/'>x</a></body></html>" } },
+    });
+    const r = await runDomainIntel(host, { net, ownedRoots: [host], secret: "x", now: () => NOW });
+    expect(r.domain).toBe(host);
+    expect(r.scope.registrableDomain).toBe("railway.app");
+    expect(r.scope.platform).toMatch(/Railway hosts .* scope is this host only/);
+    expect(r.hosts.filter((h) => !h.reference).map((h) => h.host)).toEqual([host]);
+    expect(net.calls.http.some((c) => c.url.includes("other-customer"))).toBe(false);
+    expect(net.calls.http.some((c) => c.url === "https://rdap.org/domain/railway.app")).toBe(false);
+    expect(r.scope.verification.record).toBe(`_void-verify.${host}`);
+  });
+
+  it("reads the full SMTP EHLO reply after the greeting (no false 'no STARTTLS')", async () => {
+    const { createServer } = await import("node:net");
+    const { __intelTesting } = await import("../src/domain-intel/net.js");
+    __intelTesting.allowLoopback = true;
+    const srv = createServer((sock) => {
+      let greeted = false;
+      sock.write("220-mx.fixture ESMTP ready\r\n");
+      setTimeout(() => { sock.write("220 mx.fixture ESMTP\r\n"); greeted = true; }, 60);
+      sock.on("data", (d) => {
+        if (/^EHLO/.test(d.toString())) sock.write(greeted ? "250-mx.fixture at your service\r\n250-SIZE 157286400\r\n250-8BITMIME\r\n250-STARTTLS\r\n250 SMTPUTF8\r\n" : "554 too early\r\n");
+        if (/^QUIT/.test(d.toString())) sock.end("221 bye\r\n");
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    try {
+      const port = (srv.address() as { port: number }).port;
+      const res = await liveNet.tcp("127.0.0.1", port, { smtpEhlo: "void-intel.invalid", timeoutMs: 3000 });
+      expect(res.open).toBe(true);
+      expect(res.banner).toMatch(/250-STARTTLS/);
+      expect(res.banner).toMatch(/250 SMTPUTF8/);
+    } finally {
+      __intelTesting.allowLoopback = false;
+      srv.close();
+    }
+  });
+
+  it("recognises an ECDSA P-256 certificate as EC (not a weak 256-bit key)", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { mkdtempSync, readFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { createServer } = await import("node:tls");
+    const { __intelTesting } = await import("../src/domain-intel/net.js");
+    const dir = mkdtempSync(join(tmpdir(), "intel-ec-"));
+    execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", join(dir, "k.pem"), "-out", join(dir, "c.pem"), "-days", "30", "-subj", "/CN=localhost"], { stdio: "ignore" });
+    const srv = createServer({ key: readFileSync(join(dir, "k.pem")), cert: readFileSync(join(dir, "c.pem")) }, (s) => s.end());
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    __intelTesting.allowLoopback = true;
+    try {
+      const t = await liveNet.tls("localhost", { port: (srv.address() as { port: number }).port, timeoutMs: 3000 });
+      expect(t.ok).toBe(true);
+      expect(t.cert?.keyType).toBe("EC");
+      expect(t.cert?.bits).toBe(256);
+    } finally {
+      __intelTesting.allowLoopback = false;
+      srv.close();
+    }
+  });
+});

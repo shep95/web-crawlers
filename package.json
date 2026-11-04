@@ -50,10 +50,10 @@
     "fastify": "^5.2.0",
     "hyparquet": "^1.32.0",
     "iconv-lite": "^0.7.3",
-    "image-size": "^1.2.1",
+    "image-size": "^2.0.4",
     "iso-639-3": "^3.0.1",
     "js-yaml": "^4.1.0",
-    "music-metadata": "^10.9.1",
+    "music-metadata": "^12.3.4",
     "netcdfjs": "^4.0.0",
     "pdf-lib": "^1.17.1",
     "pg": "^8.23.1",
@@ -65,8 +65,8 @@
     "tlds": "^1.261.0",
     "tldts": "^6.1.86",
     "undici": "^6.29.1",
-    "unpdf": "^0.12.2",
-    "zod": "^3.24.1"
+    "unpdf": "^1.9.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
@@ -83,5 +83,9 @@
     "un-m49": "^2.2.0",
     "vitest": "^2.1.8",
     "world-countries": "^5.1.0"
+  },
+  "overrides": {
+    "glob": "^14.0.3",
+    "minimatch": "^11.0.4"
   }
 }

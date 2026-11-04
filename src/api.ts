@@ -74,7 +74,8 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
 
   const corsOrigins = (process.env.CORS_ORIGIN ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   // CORS_ORIGIN: "*" for any origin (public read API), or a comma-separated allow-list of frontend origins.
-  await app.register(cors, { origin: corsOrigins.includes("*") ? true : corsOrigins.length ? corsOrigins : false, methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["content-type", "authorization", "x-api-key", "x-filename", "x-content-type"], maxAge: 86400 });
+  // "*" is sent literally (public, credential-less API); `true` would reflect every caller's Origin back.
+  await app.register(cors, { origin: corsOrigins.includes("*") ? "*" : corsOrigins.length ? corsOrigins : false, methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["content-type", "authorization", "x-api-key", "x-filename", "x-content-type"], maxAge: 86400 });
 
   app.addHook("onSend", async (req, reply) => {
     for (const [k, v] of Object.entries(API_SECURITY_HEADERS)) reply.header(k, v);
@@ -131,11 +132,21 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
   prune.unref();
   app.addHook("onClose", async () => clearInterval(prune));
 
+  // RFC 9116 vulnerability-reporting contact. Expires is always within a year of the response.
+  app.get("/.well-known/security.txt", async (_req, reply) => {
+    const contact = process.env.SECURITY_CONTACT ?? "https://github.com/shep95/web-crawlers/security/advisories/new";
+    const expires = new Date(Date.now() + 180 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, ".000Z");
+    reply.type("text/plain; charset=utf-8").header("cache-control", "public, max-age=86400");
+    return `Contact: ${contact}\nExpires: ${expires}\nPreferred-Languages: en\nPolicy: https://github.com/shep95/web-crawlers/security/policy\n`;
+  });
+
   if (existsSync(PUBLIC_DIR)) {
     await app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: "/", index: ["index.html"], maxAge: 3600_000, immutable: false });
     // Client-side routes (/search, /resource, /crawl …) resolve to the SPA shell instead of 404.
     app.setNotFoundHandler((req, reply) => {
-      if (req.method === "GET" && !req.url.startsWith("/api/") && !req.url.startsWith("/v1/") && (req.headers.accept ?? "").includes("text/html")) {
+      const path = req.url.split("?")[0];
+      // Only extension-less app routes fall back to the shell; files and /.well-known paths get a real 404.
+      if (req.method === "GET" && !path.startsWith("/api/") && !path.startsWith("/v1/") && !path.startsWith("/.well-known/") && !/\.[A-Za-z0-9]{1,8}$/.test(path) && (req.headers.accept ?? "").includes("text/html")) {
         return reply.type("text/html").sendFile("index.html");
       }
       return reply.code(404).send({ error: "NOT_FOUND", path: req.url.split("?")[0] });

@@ -107,7 +107,10 @@ export interface CoverageRaw {
 export async function collectCoverage(all: (sql: string) => Promise<Raw[]>, d: Dialect, backend: string, nowMs: number): Promise<CoverageRaw> {
   const q = coverageQueries(d, nowMs);
   const keys = Object.keys(q) as Array<keyof typeof q>;
-  const results = await Promise.all(keys.map((k) => all(q[k])));
+  // One at a time: these are full-table aggregates, and running them together exhausts a small
+  // container's shared memory under Postgres parallel query (seen in production: SQLSTATE 53100).
+  const results: Raw[][] = [];
+  for (const k of keys) results.push(await all(q[k]));
   const out = { now: nowMs, backend } as CoverageRaw;
   keys.forEach((k, i) => ((out as unknown as Record<string, unknown>)[k] = k === "totals" ? results[i][0] ?? {} : results[i]));
   return out;

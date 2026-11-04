@@ -404,7 +404,21 @@ export class PgCorpus implements Corpus {
   }
 
   async coverageRaw(now: number): Promise<CoverageRaw> {
-    return collectCoverage(async (sql) => (await this.q(sql)).rows, PG_DIALECT, this.backend, now);
+    // A dedicated read-only transaction with parallel workers off: the aggregates run serially on one
+    // connection, so they never need more dynamic shared memory than /dev/shm allows.
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN READ ONLY");
+      await client.query("SET LOCAL max_parallel_workers_per_gather = 0");
+      const out = await collectCoverage(async (sql) => (await client.query(sql)).rows, PG_DIALECT, this.backend, now);
+      await client.query("COMMIT");
+      return out;
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async liveCategoryEvidence() {

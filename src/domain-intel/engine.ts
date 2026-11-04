@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { domainToASCII } from "node:url";
 import { getDomain, getPublicSuffix } from "tldts";
-import { collectDomain, collectHost, registrable, sameSite, type DomainFacts, type HostFacts } from "./collect.js";
+import { attributeProvider, collectDomain, collectHost, registrable, sameSite, type DomainFacts, type HostFacts } from "./collect.js";
 import type { IntelNet } from "./net.js";
 import { FAMILIES, RULES } from "./rules.js";
 
@@ -19,7 +19,7 @@ export interface IntelEdge { from: string; to: string; kind: string }
 export interface WorkflowStep { id: string; label: string; family: string; ms: number; status: "done" | "partial" | "skipped"; detail: string }
 export interface IntelReport {
   input: string; host: string; domain: string; generatedAt: string; tookMs: number;
-  scope: { mode: "passive" | "authorized"; reason: string; ownedRoots: string[]; verification: { record: string; value: string } };
+  scope: { mode: "passive" | "authorized"; reason: string; ownedRoots: string[]; verification: { record: string; value: string }; root: string; registrableDomain: string; platform: string | null };
   decision: Record<string, boolean>;
   nodes: IntelNode[]; edges: IntelEdge[]; hosts: HostFacts[]; domainFacts: DomainFacts;
   findings: Finding[]; rules: RuleDisposition[];
@@ -53,7 +53,18 @@ export function normalizeTarget(input: string): string | null {
 
 /** Ownership token: the owner publishes TXT `_void-verify.<registrable domain>` = this value to unlock authorized checks. */
 export function verificationValue(domain: string, secret: string): string {
-  return "void-domain-verify=" + createHmac("sha256", secret).update(registrable(domain)).digest("hex").slice(0, 32);
+  return "void-domain-verify=" + createHmac("sha256", secret).update(scopeRootOf(domain)).digest("hex").slice(0, 32);
+}
+
+/**
+ * The unit of scope. Normally the registrable domain; but a tenant name on a shared platform whose
+ * suffix is not on the public-suffix list (x.up.railway.app) is scoped to the host itself, so the
+ * platform's other customers are never treated as part of the target (00-02).
+ */
+export function scopeRootOf(host: string): string {
+  const reg = registrable(host);
+  const p = attributeProvider(host);
+  return p && host !== reg && ["platform", "cdn", "cloud", "saas"].includes(p.kind) ? host : reg;
 }
 
 export interface RunOptions { net: IntelNet; ownedRoots: string[]; secret: string; now?: () => number; budgetMs?: number }
@@ -63,7 +74,8 @@ export async function runDomainIntel(input: string, opts: RunOptions): Promise<I
   const t0 = now();
   const host = normalizeTarget(input);
   if (!host) throw new Error("INVALID_DOMAIN");
-  const domain = registrable(host);
+  const registrableDomain = registrable(host);
+  let domain = scopeRootOf(host);
   const deadline = t0 + (opts.budgetMs ?? LIMITS.budgetMs);
   const budget = () => now() < deadline;
   const workflow: WorkflowStep[] = [];
@@ -83,10 +95,15 @@ export async function runDomainIntel(input: string, opts: RunOptions): Promise<I
   const authorized = declared || proven;
   const ownedRoots = authorized ? (declared ? owned.filter((r) => host === r || host.endsWith("." + r)) : [domain]) : [];
   const inOwned = (h: string) => ownedRoots.some((r) => h === r || h.endsWith("." + r));
+  // A declared owned root narrower than the registrable domain is the scope.
+  if (declared && ownedRoots[0] && ownedRoots[0].length > domain.length && ownedRoots[0].endsWith("." + domain)) domain = ownedRoots[0];
+  const inScope = (h: string) => h === domain || h.endsWith("." + domain);
+  const platform = domain !== registrableDomain ? attributeProvider(host) : null;
   const scope = {
     mode: authorized ? ("authorized" as const) : ("passive" as const),
     reason: declared ? `${host} is listed by this service's operator as an owned asset (DOMAIN_INTEL_OWNED)` : proven ? `ownership proven by ${verification.record} TXT` : "No ownership proof: passive public observation only — DNS, registration, certificate logs, archives, one TLS handshake and the public pages a browser would load. No port probes, path guessing, login attempts or injected input.",
-    ownedRoots, verification,
+    ownedRoots, verification, root: domain, registrableDomain,
+    platform: platform ? `${platform.name} hosts ${host}; scope is this host only. ${registrableDomain} and the platform\u2019s other customers are dependencies, never targets (00-02).` : null,
   };
   workflow.push({ id: "scope", label: "Authorization and scope", family: "00", ms: 0, status: "done", detail: scope.reason });
 
@@ -101,7 +118,7 @@ export async function runDomainIntel(input: string, opts: RunOptions): Promise<I
   let queue: Q[] = [{ host, depth: 0, parent: null, via: "input", reference: false }];
   queued.add(host);
   const platformName = getPublicSuffix(domain, { allowPrivateDomains: true }) !== getPublicSuffix(domain);
-  if (host === domain && !platformName && !queued.has("www." + domain)) {
+  if (host === domain && domain === registrableDomain && !platformName && !queued.has("www." + domain)) {
     queue.push({ host: "www." + domain, depth: 1, parent: host, via: "conventional www", reference: false });
     queued.add("www." + domain);
   }
@@ -110,21 +127,21 @@ export async function runDomainIntel(input: string, opts: RunOptions): Promise<I
     if (!h || h === parent) return;
     edges.push({ from: parent, to: h, kind: via });
     if (queued.has(h)) return; // 00-08: link to the existing node, do not revisit
-    const reference = !sameSite(h, domain);
-    const inScopeCount = [...queued].filter((x) => sameSite(x, domain)).length;
+    const reference = !inScope(h);
+    const inScopeCount = [...queued].filter((x) => inScope(x)).length;
     const refCount = queued.size - inScopeCount;
     if (reference ? refCount >= LIMITS.referenceHosts : inScopeCount >= LIMITS.inScopeHosts || depth > LIMITS.depth) return;
     queued.add(h);
     queue.push({ host: h, depth, parent, via, reference });
   };
-  const ctCandidates = domainFacts.ct.names.filter((n) => n !== host && n !== domain).sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b));
+  const ctCandidates = domainFacts.ct.names.filter((n) => n !== host && n !== domain && inScope(n)).sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b));
   const traversalStart = now();
   let rounds = 0;
   const probedIps = new Set<string>();
   while (queue.length && budget()) {
     rounds++;
     const batch = queue.splice(0, 6);
-    const done = await Promise.all(batch.map((q) => collectHost(opts.net, q.host, { depth: q.depth, parent: q.parent, via: q.via, inScope: sameSite(q.host, domain), reference: q.reference, authorized: authorized && inOwned(q.host), budget, probedIps })));
+    const done = await Promise.all(batch.map((q) => collectHost(opts.net, q.host, { depth: q.depth, parent: q.parent, via: q.via, inScope: inScope(q.host), reference: q.reference, authorized: authorized && inOwned(q.host), budget, probedIps })));
     for (const f of done) {
       hosts.set(f.host, f);
       if (f.reference) continue;
@@ -147,7 +164,7 @@ export async function runDomainIntel(input: string, opts: RunOptions): Promise<I
       for (const l of f.page?.links ?? []) {
         try {
           const h = new URL(l).hostname;
-          if (h !== f.host && sameSite(h, domain)) enqueue(h, f.host, "page link", f.depth + 1);
+          if (h !== f.host && inScope(h)) enqueue(h, f.host, "page link", f.depth + 1);
         } catch {
           /* ignore */
         }
@@ -175,7 +192,7 @@ export async function runDomainIntel(input: string, opts: RunOptions): Promise<I
   const nodes: IntelNode[] = [{ id: domain, type: "domain", label: domain, inScope: true, detail: domainFacts.rdap?.registrar ?? undefined }];
   for (const h of hostList) {
     if (h.host !== domain) nodes.push({ id: h.host, type: h.reference ? "reference" : "host", label: h.host, inScope: !h.reference, detail: h.provider ? `${h.provider.name} (${h.provider.kind})` : h.addresses.length ? `${h.addresses.length} address(es)` : "no address" });
-    if (h.host !== domain && sameSite(h.host, domain) && !edges.some((e) => e.to === h.host)) edges.push({ from: domain, to: h.host, kind: "subdomain" });
+    if (h.host !== domain && inScope(h.host) && !edges.some((e) => e.to === h.host)) edges.push({ from: domain, to: h.host, kind: "subdomain" });
     for (const ip of h.ips) {
       if (!nodes.some((n) => n.id === ip.ip)) nodes.push({ id: ip.ip, type: "ip", label: ip.ip, inScope: !ip.provider && authorized, detail: [ip.network, ip.org, ip.country].filter(Boolean).join(" · ") });
       edges.push({ from: h.host, to: ip.ip, kind: "resolves" });
@@ -296,7 +313,7 @@ export function analyze(d: DomainFacts, hosts: HostFacts[], c: Ctx): Finding[] {
       else if (days < 14) add({ rule: "04-01", title: `TLS certificate expires in ${days} days`, severity: "medium", state: "observed", asset: h.host, evidence: [`valid to ${h.tls.cert.validTo}`], why: "Renewal may be failing.", next: "Check the renewal job.", fix: "Renew; alert at 21 days." });
       if (h.tls.cert.selfSigned) add({ rule: "04-01", title: "Self-signed certificate", severity: "high", state: "observed", asset: h.host, evidence: [`subject = issuer = ${h.tls.cert.subject.slice(0, 80)}`], why: "Browsers cannot verify the server.", next: "Replace.", fix: "Use a publicly trusted certificate." });
       if (h.tls.authorizationError && /altname|hostname/i.test(h.tls.authorizationError)) add({ rule: "04-01", title: "Certificate does not cover this hostname", severity: "high", state: "validated", asset: h.host, evidence: [h.tls.authorizationError, `SAN: ${h.tls.cert.san.slice(0, 6).join(", ")}`], why: "Browsers reject the connection.", next: "Reissue with the hostname.", fix: "Add the hostname to the certificate SAN." });
-      if (h.tls.cert.bits && h.tls.cert.bits < 2048 && !/EC|ecdsa/i.test(h.tls.cipher ?? "")) add({ rule: "04-02", title: `Certificate key is ${h.tls.cert.bits} bits`, severity: "medium", state: "observed", asset: h.host, evidence: [`key ${h.tls.cert.bits} bits`], why: "RSA keys under 2048 bits are weak.", next: "Reissue.", fix: "Use RSA ≥2048 or ECDSA P-256." });
+      if (h.tls.cert.bits && (h.tls.cert.keyType === "EC" ? h.tls.cert.bits < 224 : h.tls.cert.keyType === "RSA" && h.tls.cert.bits < 2048)) add({ rule: "04-02", title: `Certificate key is ${h.tls.cert.keyType ?? ""} ${h.tls.cert.bits} bits`.replace("  ", " "), severity: "medium", state: "observed", asset: h.host, evidence: [`key ${h.tls.cert.bits} bits`], why: "RSA keys under 2048 bits are weak.", next: "Reissue.", fix: "Use RSA ≥2048 or ECDSA P-256." });
     }
     if (h.tls?.ok && h.tls.protocol && /TLSv1(\.1)?$/.test(h.tls.protocol)) add({ rule: "04-02", title: `Server negotiated ${h.tls.protocol}`, severity: "medium", state: "validated", asset: h.host, evidence: [`default handshake → ${h.tls.protocol} ${h.tls.cipher}`], why: "TLS 1.0/1.1 are deprecated (RFC 8996).", next: "Disable them.", fix: "Allow TLS 1.2 and 1.3 only." });
     for (const [v, ok] of Object.entries(h.legacyTls ?? {})) if (ok) add({ rule: "04-02", title: `${v} is still accepted`, severity: "medium", state: "validated", asset: h.host, evidence: [`handshake restricted to ${v} succeeded`], why: "Deprecated protocol versions allow downgrade to weaker cryptography (RFC 8996).", next: "Disable at the edge.", fix: "Set the minimum protocol to TLS 1.2." });
@@ -346,7 +363,7 @@ export function analyze(d: DomainFacts, hosts: HostFacts[], c: Ctx): Finding[] {
     }
     if (h.notFound?.leaks.length) add({ rule: "05-12", title: "Error page leaks internals", severity: "medium", state: "observed", asset: h.host, evidence: h.notFound.leaks, why: "Stack traces and debug pages reveal code paths, versions and configuration.", next: "Disable debug mode.", fix: "Serve generic error pages in production; log details server-side." });
     if (h.notFound?.soft404) add({ rule: "05-12", title: "Unknown paths return 200 (soft 404)", severity: "info", state: "observed", asset: h.host, evidence: ["random path answered 200"], why: "Monitoring and scanners cannot distinguish missing pages; usually an SPA fallback.", next: "—", fix: "Return 404 for unknown routes where possible." });
-    if (h.https?.status && h.https.status < 400 && h.page && h.securityTxt && (h.securityTxt.status !== 200 || !h.securityTxt.contact.length) && h.host === c.host) add({ rule: "17-02", title: "No security.txt (vulnerability contact)", severity: "info", state: "observed", asset: h.host, evidence: [`/.well-known/security.txt → ${h.securityTxt.status}`], why: "Researchers who find a problem have no published way to report it (RFC 9116).", next: "—", fix: "Publish /.well-known/security.txt with Contact and Expires." });
+    if (h.https?.status && h.https.status < 400 && h.page && h.securityTxt && (h.securityTxt.status !== 200 || !h.securityTxt.contact.length) && h.host === c.host) add({ rule: "17-02", title: "No security.txt (vulnerability contact)", severity: "info", state: "observed", asset: h.host, evidence: [h.securityTxt.status === 200 ? "/.well-known/security.txt → 200, but the response has no Contact field (likely a catch-all page)" : `/.well-known/security.txt → ${h.securityTxt.status}`], why: "Researchers who find a problem have no published way to report it (RFC 9116).", next: "—", fix: "Publish /.well-known/security.txt with Contact and Expires." });
     else if (h.securityTxt?.expired) add({ rule: "17-02", title: "security.txt has expired", severity: "low", state: "observed", asset: h.host, evidence: [`Expires: ${h.securityTxt.expires}`], why: "An expired file may point to a dead contact.", next: "—", fix: "Update Expires and contacts." });
     for (const e of (h.exposures ?? []).filter((x) => x.signature)) {
       const benign = /openid-configuration|swagger|openapi|actuator\/health|graphql/.test(e.path);
