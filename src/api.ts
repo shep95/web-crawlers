@@ -28,6 +28,7 @@ import { registerV2 } from "./http/v2.js";
 import { registerCorpusRoutes } from "./http/corpus-routes.js";
 import { registerTextRoutes } from "./http/text-routes.js";
 import { registerDomainIntelRoutes } from "./http/domain-routes.js";
+import { memoryStatus } from "./corpus/memory-guard.js";
 import { openCorpus } from "./corpus/pg-store.js";
 import type { Corpus, CrawlerProfile } from "./corpus/types.js";
 import { AutonomousCrawler } from "./corpus/crawler.js";
@@ -122,7 +123,7 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
     const beat = setInterval(() => {
       void store
         .stats()
-        .then((st) => app.log.info({ heartbeat: true, crawlers: crawlers.map((c) => ({ id: c.id, processed: c.processed })), frontier: st.byState.queued ?? 0, byState: st.byState, byKind: st.byKind, observations: st.observations, categoriesObserved: st.categoriesObserved, hosts: st.hosts }, "crawler_heartbeat"))
+        .then((st) => app.log.info({ heartbeat: true, memory: memoryStatus(), rssMb: Math.round(process.memoryUsage().rss / 1048576), crawlers: crawlers.map((c) => ({ id: c.id, processed: c.processed })), frontier: st.byState.queued ?? 0, byState: st.byState, byKind: st.byKind, observations: st.observations, categoriesObserved: st.categoriesObserved, hosts: st.hosts }, "crawler_heartbeat"))
         .catch(() => undefined);
     }, Number(process.env.HEARTBEAT_MS ?? 300_000));
     beat.unref();

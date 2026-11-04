@@ -7,6 +7,7 @@ import type { MetadataField, ResourceKind, ResourceRecord } from "../metadata/ty
 import { safeFetch, type SafeResponse, FetchBlockedError } from "../net/safe-fetch.js";
 import { checkUrl } from "../net/ip-guard.js";
 import { collectReferences, classifyReference, DEFAULT_LIMITS, type CrawlLimits, type Reference } from "./discovery.js";
+import { admitWork, withBodyBudget } from "./memory-guard.js";
 import { allSourcesWithPolicy, partitionSources, type DisabledSource, type DiscoverySource } from "./bootstrap.js";
 import { SOURCE_FAMILIES, type RotationCoverage } from "./rotation.js";
 import { SYSTEM_RETENTION, type Corpus, type CrawlerProfile, type FrontierItem, type ResourceRow, type ResourceState } from "./types.js";
@@ -160,6 +161,8 @@ export class AutonomousCrawler extends EventEmitter {
     }
     const free = this.deps.concurrency - this.inFlight.size;
     if (free <= 0 || this.stopping) return 0;
+    // Heap above the high-water mark: finish what is in flight, lease nothing new until it drains.
+    if (!admitWork()) return 0;
     const batch = await this.store.lease(free, 5 * 60_000, now, this.deps.profile);
     for (const r of batch) {
       const p = this.process(r).finally(() => this.inFlight.delete(p));
@@ -262,6 +265,7 @@ export class AutonomousCrawler extends EventEmitter {
       if (row.last_modified) conditional["if-modified-since"] = row.last_modified;
       await store.event(row.id, revisit ? "revisit" : "retrieve", `${this.id}: ${row.url}`);
       let res = await this.deps.fetch(row.url, conditional);
+      return await withBodyBudget(res.body.length, async () => {
       const transport = `HTTP ${res.status}, ${res.body.length} bytes${res.truncated ? " (truncated at byte cap)" : ""}${res.redirects.length ? `, ${res.redirects.length} redirect(s)` : ""}`;
       await lc.to("fetched", `http_${res.status}`, transport, { retrieved_at: iso(), http_status: res.status, final_url: res.finalUrl });
       await store.event(row.id, "retrieved", transport);
@@ -394,6 +398,7 @@ export class AutonomousCrawler extends EventEmitter {
       if (!dupOf) await this.discover(row, record, shared, now);
       this.processed++;
       this.emit("processed", { id: row.id, url: row.url, state: index ? "indexed" : "duplicate", lifecycle: lc.cur });
+      });
     } catch (err) {
       const msg = (err as Error).message.slice(0, 300);
       if (RESTING_STATES.has(lc.cur)) {

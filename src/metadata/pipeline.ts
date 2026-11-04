@@ -33,7 +33,8 @@ export interface AnalyzeOptions {
 }
 
 const MAX_BYTES = Number(process.env.MAX_FETCH_BYTES ?? 25 * 1024 * 1024);
-const MAX_PARSE_CHARS = 6 * 1024 * 1024;
+// DOM parse limit: a DOM is many times its source size, so very large pages are parsed from their first part only.
+const MAX_PARSE_CHARS = Number(process.env.MAX_PARSE_CHARS ?? 2 * 1024 * 1024);
 const cache = new LruCache<ResourceRecord>(Number(process.env.RESULT_CACHE_SIZE ?? 300), Number(process.env.RESULT_CACHE_TTL_MS ?? 10 * 60_000));
 const robotsCache = new LruCache<ReturnType<typeof robotsParser> | null>(2000, 30 * 60_000);
 /** Bounds concurrent analyses so a burst cannot exhaust container memory. */
