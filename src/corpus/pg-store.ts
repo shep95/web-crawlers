@@ -229,6 +229,11 @@ export class PgCorpus implements Corpus {
   async backfillTitles(batch = 2000): Promise<number> {
     let total = 0;
     try {
+      // A previous release built idx_docs_title_tsv concurrently; a build cancelled by a redeploy leaves an
+      // invalid index that is still maintained on every write. It is unused now: remove it if present.
+      if ((await this.q(`SELECT 1 FROM pg_class WHERE relname = 'idx_docs_title_tsv'`)).rowCount) {
+        await this.q(`DROP INDEX CONCURRENTLY IF EXISTS idx_docs_title_tsv`).catch(() => undefined);
+      }
       if (await this.checkTitlesReady()) return 0;
       let after = Number((await this.q<{ m: string | null }>(`SELECT MAX(resource_id) m FROM corpus_titles`)).rows[0].m ?? 0);
       for (;;) {
