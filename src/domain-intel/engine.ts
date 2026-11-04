@@ -28,7 +28,7 @@ export interface IntelReport {
 }
 
 const DAY = 86_400_000;
-const LIMITS = { inScopeHosts: 16, referenceHosts: 30, depth: 3, budgetMs: 75_000 };
+const LIMITS = { inScopeHosts: 16, referenceHosts: 30, depth: 3, budgetMs: 50_000 };
 
 export function normalizeTarget(input: string): string | null {
   let s = input.trim().toLowerCase();

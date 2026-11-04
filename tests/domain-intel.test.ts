@@ -159,6 +159,8 @@ describe("domain intelligence — passive run", () => {
     expect(dangling.chain.filter((s) => s.state === "not-tested")).toHaveLength(3);
     // The secret value is never in the report.
     expect(JSON.stringify(r)).not.toContain(FAKE_AWS);
+    // Page bodies are not carried in the report.
+    expect(r.hosts.every((h) => !h.https?.body)).toBe(true);
     // Cookie values are masked.
     expect(JSON.stringify(r.findings)).not.toContain("abc123");
     // Passive: no sensitive-path probes, no Origin header test, no legacy TLS, no port probes except the SMTP MX.

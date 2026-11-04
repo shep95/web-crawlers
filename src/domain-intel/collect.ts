@@ -493,6 +493,8 @@ export async function collectHost(
       f.ports = await Promise.all(DB_PORTS.map((p) => net.tcp(target, p, { readBanner: [21, 22, 25, 110, 143].includes(p), timeoutMs: 3000 })));
     }
   }
+  // Raw bodies were only needed for parsing; the report keeps derived facts, never page contents.
+  if (f.https) f.https = { ...f.https, body: "" };
   f.ms = Date.now() - t0;
   return f;
 }
