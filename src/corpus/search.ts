@@ -182,7 +182,9 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
   const TYPE_WORDS = /^(research|dataset|datasets|data|report|reports|paper|papers|document|documents|image|images|photo|photos|video|videos|audio|recordings?|files?|records?|about|information|resources?)$/i;
   const contentTerms = terms.filter((t) => !TYPE_WORDS.test(t));
   const searchTerms = contentTerms.length ? contentTerms : terms;
+  const tSearch = Date.now();
   const found = await store.searchResources({ terms: searchTerms, kind: opts.kind, host: opts.host, hosts: opts.hosts, category: opts.category, limit: Math.min(limit * 3, 100), offset: opts.offset ?? 0 });
+  const msCandidates = Date.now() - tSearch;
   const { total } = found;
   const rows = found.rows.filter((r) => !isExcludedHost(r.host));
   const scored = rows.map((r) => {
@@ -200,11 +202,15 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
   // Batched loading: a constant number of queries per search, regardless of how many results.
   const top = scored.slice(0, limit);
   const ids = top.map(({ r }) => r.id);
+  const tLoad = Date.now();
   const [latest, links] = await Promise.all([store.latestSnapshots(ids), store.linksFor(ids)]);
   const supportIds = [...new Set(ids.flatMap((id) => (links.from.get(id) ?? []).filter((l) => l.state === "indexed").slice(0, 6).map((l) => l.id)))];
   const supportLatest = await store.latestSnapshots(supportIds);
   const snapIds = [...latest.values()];
+  const msLinks = Date.now() - tLoad;
+  const tObs = Date.now();
   const [obsBySnap, records] = await Promise.all([store.observationsForSnapshots([...snapIds, ...supportLatest.values()]), store.snapshotRecords(snapIds)]);
+  const msEvidence = Date.now() - tObs;
   const intentSet = new Set(intentCats);
   const results = [];
   for (const { r, score } of top) {
@@ -254,7 +260,9 @@ export async function searchCorpus(store: Corpus, q: string, opts: CorpusSearchO
   const strong = results.filter((x) => x.matchedIn === "title").length;
   const someTitle = results.filter((x) => x.titleTerms > 0).length;
   const matchQuality: "strong" | "partial" | "weak" | "none" = strong >= 3 ? "strong" : strong >= 1 || someTitle >= 3 ? "partial" : results.length ? "weak" : "none";
-  return { ...base, total, totalIsLowerBound: Boolean(found.totalIsLowerBound), matchQuality, results, tookMs: Date.now() - started };
+  // Where the time went (measured per request; used to diagnose slow searches in production).
+  const timings = { candidates: msCandidates, ...(found.ms ?? {}), snapshotsAndLinks: msLinks, evidence: msEvidence, total: Date.now() - started };
+  return { ...base, total, totalIsLowerBound: Boolean(found.totalIsLowerBound), matchQuality, results, tookMs: Date.now() - started, timings };
 }
 
 /** Full evidence view of one collected resource. */

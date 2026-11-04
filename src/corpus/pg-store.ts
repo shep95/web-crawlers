@@ -694,15 +694,18 @@ export class PgCorpus implements Corpus {
       );
       return res.rows.map((r) => ({ ...toRow(r), rank: Number(r.rank), snippet: (r.snippet as string) || null }) as SearchCandidate);
     };
+    const t0 = Date.now();
     const all = await run(andQ, q.limit, q.offset);
+    const t1 = Date.now();
     const total = Number((await this.q<{ n: string }>(`SELECT COUNT(*) n FROM (SELECT 1 FROM corpus_docs d WHERE d.tsv @@ to_tsquery('english', $1) LIMIT 1000) s`, [andQ])).rows[0].n);
-    if (all.length >= q.limit || q.terms.length < 2) return { rows: all, total, totalIsLowerBound: total >= 1000 };
+    const ms = { ranked: t1 - t0, count: Date.now() - t1 };
+    if (all.length >= q.limit || q.terms.length < 2) return { rows: all, total, totalIsLowerBound: total >= 1000, ms };
     const seen = new Set(all.map((r) => r.id));
     const any = (await run(orQ, q.limit * 2, 0)).filter((r) => !seen.has(r.id)).slice(0, q.limit - all.length);
     const minAll = all.length ? Math.min(...all.map((r) => r.rank)) : Infinity;
     const maxAny = Math.max(1e-9, ...any.map((r) => r.rank));
     const some = any.map((r) => ({ ...r, rank: Number.isFinite(minAll) ? (r.rank / maxAny) * minAll * 0.5 : r.rank }));
-    return { rows: [...all, ...some], total: total + some.length, totalIsLowerBound: true };
+    return { rows: [...all, ...some], total: total + some.length, totalIsLowerBound: true, ms: { ...ms, anyTerm: Date.now() - t1 - ms.count } };
   }
 
   async matchObservations(snapshotId: number, terms: string[], categories: number[], limit: number): Promise<MetadataField[]> {
