@@ -103,16 +103,22 @@ describe("person page reading", () => {
     const none = readPage({ title: "", description: "", body: "Delgado retired in 2022." }, q, re, 2023);
     expect(none.events).toEqual([]);
   });
-  it("shows long unpunctuated text as a window around the name and around each date", () => {
+  it("shows long unpunctuated text as a window around the name, attributing only nearby dates", () => {
     const filler = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(" ");
     const body = `${filler(150)} the 2011 report thanks Maria Delgado for her review of chapter four ${filler(55)} published in 1999 ${filler(40)}`;
     const r = readPage({ title: "", description: "", body }, q, re, 2012);
     expect(r.sentences[0]).toContain("Maria Delgado");
     expect(r.sentences[0].length).toBeLessThanOrEqual(422);
     expect(r.sentences[0].startsWith("…")).toBe(true);
-    const e1999 = r.events.find((e) => e.date.iso === "1999")!;
-    expect(e1999.text).toContain("1999");
+    // A date hundreds of characters from the name in the same run-on text is not attributed to the person.
+    expect(r.events.some((e) => e.date.iso === "1999")).toBe(false);
     expect(r.events.find((e) => e.date.iso === "2011")!.text).toContain("Maria Delgado");
+  });
+  it("does not take another person's birth or death from a long sentence", () => {
+    const body = "The 1998 committee, chaired by Maria Delgado, reviewed the archive of a composer who was born March 3, 1901 in Vienna and died in 1972 in Paris.";
+    const r = readPage({ title: "", description: "", body }, q, re, 2000);
+    expect(r.birth).toEqual([]);
+    expect(r.death).toBeNull();
   });
   it("masks phone numbers but not year ranges", () => {
     expect(maskContacts("Call +1 512 555 0199 today").text).toBe("Call [phone hidden] today");

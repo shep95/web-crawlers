@@ -228,21 +228,31 @@ export function readPage(doc: { title: string; description: string; body: string
     masked += clean.masked;
     if (s.via === "name" && out.length < 40) out.push(clean.text);
     for (const r of raw.matchAll(ROLE_RE)) if (roles.size < 8) roles.add(r[1].toLowerCase().trim());
-    const dates = findDates(raw);
-    // Birth: "born <date>", "(born <date>)", "b. 1970", or a lifespan "(1931–2012)" right after the name.
-    const bornAt = raw.search(/\b(?:born|b\.)\s/i);
+    // Only dates near the name (or the pronoun/surname that stands for it) are about this person: long
+    // "sentences" in PDF text can hold many people and years.
+    const dates = findDates(raw).filter((d) => Math.abs(d.index - nameAt) <= NEAR);
+    // Birth: "born <date>" / "(born <date>)" / "b. 1970" just after the name, or a lifespan "(1931–2012)".
+    // Only forms tied to the name: "Name (born …", "Name, born …", "Name was born …", "She was born …".
+    const tied = s.via === "following"
+      ? raw.match(/^\s*["“]?(?:he|she|they)\s+(?:was|were)\s+(?=born\s)/i)
+      : raw.slice(nameAt).match(/^[\p{L}\p{M}'’.-]+(?:\s+[\p{L}\p{M}'’.-]+){0,4}?\s*(?:\(\s*|,\s*|\s+(?:was|is)\s+)(?=(?:born|b\.)\s)/u);
+    const bornAt = tied ? (s.via === "following" ? 0 : nameAt) + tied[0].length : -1;
     if (bornAt >= 0) {
       const d = dates.find((x) => x.index > bornAt && x.index - bornAt < 60);
       if (d) birth.push({ y: d.y, m: d.m, d: d.d, how: "stated", yMin: d.y, yMax: d.y, text: clean.text });
     }
-    const life = raw.match(/\((?:born\s+)?(1[5-9]\d\d|20\d\d)\s*[–—-]\s*(1[5-9]\d\d|20\d\d)?\s*\)/);
-    if (life && s.via === "name") {
+    const lifeM = s.via === "name" ? raw.slice(nameAt, nameAt + 120).match(/^[^()]{0,40}\((?:born\s+)?(1[5-9]\d\d|20\d\d)\s*[–—-]\s*(1[5-9]\d\d|20\d\d)?\s*\)/) : null;
+    const life = lifeM ? Object.assign([lifeM[0].slice(lifeM[0].indexOf("(")), lifeM[1], lifeM[2]], { index: nameAt + lifeM[0].indexOf("(") }) : null;
+    if (life) {
       birth.push({ y: +life[1], how: "stated", yMin: +life[1], yMax: +life[1], text: clean.text });
       if (life[2]) death = { y: +life[2], text: clean.text };
     }
-    const died = raw.search(/\b(?:died|passed away)\b/i);
-    if (died >= 0 && !death) {
-      const d = dates.find((x) => x.index > died && x.index - died < 60);
+    const diedTied = s.via === "following"
+      ? raw.match(/^\s*["“]?(?:he|she|they)\s+(?=died\b|passed away\b)/i)
+      : raw.slice(nameAt).match(/^[\p{L}\p{M}'’.-]+(?:\s+[\p{L}\p{M}'’.-]+){0,4}?(?:,\s*who\s+|\s+)(?=died\b|passed away\b)/u);
+    const diedAt = diedTied ? (s.via === "following" ? 0 : nameAt) + diedTied[0].length : -1;
+    if (diedAt >= 0 && !death) {
+      const d = dates.find((x) => x.index > diedAt && x.index - diedAt < 60);
       if (d) death = { y: d.y, text: clean.text };
     }
     // Age as written in news style: "Jane Doe, 38, of Austin" — gives a birth year within one year.
@@ -251,8 +261,8 @@ export function readPage(doc: { title: string; description: string; body: string
       const a = age ? Number(age[age.length - 1]) : NaN;
       if (a >= 1 && a <= 115) birth.push({ y: pageYear - a, how: "age", yMin: pageYear - a - 1, yMax: pageYear - a, text: clean.text });
     }
-    const kind = kindOf(raw);
-    const lifeAt = life ? raw.indexOf(life[0]) : -1;
+    const kind = kindOf(raw.length <= CLIP ? raw : raw.slice(Math.max(0, nameAt - 150), nameAt + NEAR));
+    const lifeAt = life ? life.index : -1;
     for (const d of dates.slice(0, 6)) {
       events.push({
         date: { iso: isoOf(d), y: d.y, ...(d.m ? { m: d.m } : {}), ...(d.d ? { d: d.d } : {}), precision: d.precision, text: d.text, ...(d.ambiguous ? { ambiguous: true } : {}) },
@@ -271,6 +281,8 @@ export function readPage(doc: { title: string; description: string; body: string
 }
 
 const CLIP = 420;
+/** How far from the name (in characters) a date may be and still be attributed to the person. */
+const NEAR = 250;
 /** At most CLIP characters of text, starting a little before `at`, with ellipses where cut. */
 export function clip(text: string, at: number): string {
   if (text.length <= CLIP) return text;

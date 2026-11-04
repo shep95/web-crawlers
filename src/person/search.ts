@@ -45,10 +45,16 @@ const toIso = (s: string | null | undefined) => {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
 
+/** Publication dates outside printing-to-next-year (a "1025" typo for 2025, a far-future date) are not dates. */
+const plausible = (iso: string | null) => {
+  if (!iso) return null;
+  const y = +iso.slice(0, 4);
+  return y >= 1450 && y <= new Date().getUTCFullYear() + 1 ? iso : null;
+};
 function pageDate(r: SearchCandidate): PersonResult["pageDate"] {
-  const p = toIso(r.published_at);
+  const p = plausible(toIso(r.published_at));
   if (p) return { iso: p, source: "published" };
-  const lm = toIso(r.last_modified);
+  const lm = plausible(toIso(r.last_modified));
   return lm ? { iso: lm, source: "last-modified" } : null;
 }
 
