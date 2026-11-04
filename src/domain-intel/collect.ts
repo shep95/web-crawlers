@@ -1,5 +1,6 @@
 import * as cheerio from "cheerio";
 import { getDomain, getPublicSuffix, getSubdomain } from "tldts";
+import { createHash } from "node:crypto";
 import { detectSecrets, type SecretType } from "../text/secrets.js";
 import type { DnsResult, HttpResult, IntelNet, TcpResult, TlsResult } from "./net.js";
 
@@ -32,10 +33,10 @@ export interface PageFacts {
   title: string | null; generator: string | null; lang: string | null; bytes: number;
   forms: Array<{ action: string; method: string; password: boolean; file: boolean; hidden: string[]; inputs: string[]; csrf: boolean; insecureAction: boolean }>;
   scripts: ScriptFacts[]; inlineScripts: number; iframes: string[]; links: string[]; externalHosts: string[];
-  manifest: string | null; spa: string[]; frameworks: string[];
+  manifest: string | null; favicon: string | null; spa: string[]; frameworks: string[];
   authLinks: { login: string[]; register: string[]; reset: string[]; logout: string[]; sso: string[] };
   paramLinks: Array<{ url: string; params: string[] }>; redirectParams: string[]; idRoutes: string[]; fileRoutes: string[];
-  searchOrPaging: string[]; versionedApi: string[]; mixedContent: string[]; emails: number;
+  searchOrPaging: string[]; versionedApi: string[]; mixedContent: string[]; emails: number; contacts: string[]; technologies: string[]; trackingIds: string[];
   signals: { storage: string[]; postMessage: boolean; messageListener: boolean; innerHTML: boolean; eval: boolean; wasm: boolean; serviceWorker: boolean; websocket: string[]; graphql: string[]; apiCalls: string[]; sourceMaps: string[] };
   secrets: Array<{ type: SecretType; confidence: string; location: string; length: number; placeholder: boolean }>;
   thirdParty: Array<{ host: string; category: string }>;
@@ -52,6 +53,8 @@ export interface HostFacts {
   notFound: { status: number; leaks: string[]; soft404: boolean } | null; oidc: null | { issuer: string | null; grants: string[]; pkce: boolean };
   ports: TcpResult[] | null; exposures: Array<{ path: string; status: number; signature: string | null; bytes: number }> | null;
   cors: null | { origin: string; acao: string | null; credentials: boolean; reflected: boolean }; openRedirect: null | { url: string; location: string | null; external: boolean };
+  favicon: null | { url: string; status: number; bytes: number; mmh3: number; sha256: string };
+  technologies: string[];
   dnsFailed: string[]; errors: string[]; ms: number;
 }
 
@@ -146,7 +149,7 @@ export async function collectDomain(net: IntelNet, domain: string, opts: { autho
     net.dns(domain, "TXT"), net.dns(`_dmarc.${domain}`, "TXT"), net.dns(`_mta-sts.${domain}`, "TXT"), net.dns(`_smtp._tls.${domain}`, "TXT"),
     net.dns(`default._bimi.${domain}`, "TXT"), net.dns(domain, "DS"), net.dns(domain, "DNSKEY"), net.dns(probe, "A"), net.dns(domain, "MX"),
     net.json<Array<{ name_value: string; issuer_name: string; not_before: string; not_after: string }>>(`https://crt.sh/?q=${encodeURIComponent("%." + domain)}&output=json&exclude=expired&deduplicate=Y`, 20_000),
-    net.json<string[][]>(`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(domain + "/*")}&output=json&fl=original&collapse=urlkey&limit=400`, 15_000),
+    net.json<string[][]>(`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(domain + "/*")}&output=json&fl=original&collapse=urlkey&limit=3000`, 15_000),
   ]);
   const failed = (r: DnsResult) => r.status === -1 || r.status === 2; // transport error or SERVFAIL
   for (const [name, r] of [["txt", txt], ["dmarc", dmarc], ["mta-sts", mtaSts], ["tls-rpt", tlsRpt], ["ds", ds], ["dnskey", dnskey], ["wildcard", wild], ["mx", mx]] as const) if (failed(r)) facts.unavailable.push(name);
@@ -237,8 +240,8 @@ export async function collectDomain(net: IntelNet, domain: string, opts: { autho
   } else facts.ct.error = "certificate transparency log (crt.sh) did not answer in time";
   if (wb && Array.isArray(wb)) {
     const urls = wb.slice(1).map((r) => r[0]).filter(Boolean);
-    facts.wayback.urls = urls.slice(0, 400);
-    facts.wayback.interesting = urls.filter((u) => /\/(admin|wp-admin|wp-login|phpmyadmin|backup|old|test|staging|dev|debug|console|api\/v\d|graphql|swagger|\.env|\.git|config|export|download|upload)\b|\.(bak|sql|zip|tar|gz|log|old|swp)(\?|$)/i.test(u)).slice(0, 60);
+    facts.wayback.urls = urls;
+    facts.wayback.interesting = urls.filter((u) => /\/(admin|wp-admin|wp-login|phpmyadmin|backup|old|test|staging|dev|debug|console|api\/v\d|graphql|swagger|\.env|\.git|config|export|download|upload)\b|\.(bak|sql|zip|tar|gz|log|old|swp)(\?|$)/i.test(u)).slice(0, 500);
   } else facts.wayback.error = "Internet Archive CDX did not answer in time";
   // Lookalikes (01-04): a small set of confusable variants, checked by DNS only (registered or not).
   if (opts.budget()) {
@@ -359,7 +362,7 @@ export async function collectHost(
   const t0 = Date.now();
   const f: HostFacts = {
     host, depth: meta.depth, parent: meta.parent, via: meta.via, inScope: meta.inScope, reference: meta.reference, provider: null, dns: {}, cnameChain: [], addresses: [], dangling: null,
-    ips: [], https: null, http: null, tls: null, legacyTls: null, page: null, robots: null, sitemap: null, securityTxt: null, notFound: null, oidc: null, ports: null, exposures: null, cors: null, openRedirect: null, dnsFailed: [], errors: [], ms: 0,
+    ips: [], https: null, http: null, tls: null, legacyTls: null, page: null, robots: null, sitemap: null, securityTxt: null, notFound: null, oidc: null, ports: null, exposures: null, cors: null, openRedirect: null, favicon: null, technologies: [], dnsFailed: [], errors: [], ms: 0,
   };
   const types = meta.reference ? ["A", "AAAA", "CNAME"] : ["A", "AAAA", "CNAME", "NS", "MX", "TXT", "CAA", "SOA", "HTTPS"];
   const res = await Promise.all(types.map((t) => net.dns(host, t)));
@@ -465,6 +468,16 @@ export async function collectHost(
       }
     }
   }
+  // Favicon fingerprint: MurmurHash3 of the base64 body (the hash search engines index), plus SHA-256.
+  if (base && meta.budget()) {
+    const href = f.page?.favicon ?? `https://${host}/favicon.ico`;
+    const fav = await net.http(href, { maxBytes: 256 * 1024, timeoutMs: 8000, raw: true });
+    if (fav.status === 200 && fav.bytes?.length && !/text\/html/i.test(fav.headers["content-type"] ?? "")) {
+      const bytes = fav.bytes;
+      const b64 = bytes.toString("base64").replace(/.{76}/g, "$&\n") + "\n";
+      f.favicon = { url: href, status: fav.status, bytes: bytes.length, mmh3: murmur3(Buffer.from(b64)), sha256: createHash("sha256").update(bytes).digest("hex") };
+    }
+  }
   // Authorized-only checks (00-01): run only for assets the operator owns, and never against third-party networks (00-02).
   const thirdPartyNetwork = !!f.provider && f.provider.kind !== "saas";
   if (meta.authorized && meta.inScope && base && meta.budget()) {
@@ -494,6 +507,7 @@ export async function collectHost(
       f.ports = await Promise.all(DB_PORTS.map((p) => net.tcp(target, p, { readBanner: [21, 22, 25, 110, 143].includes(p), timeoutMs: 3000 })));
     }
   }
+  f.technologies = [...new Set([...techFromHeaders(f.https?.headers ?? {}), ...(f.page?.technologies ?? []), ...(f.page?.frameworks ?? [])])];
   // Raw bodies were only needed for parsing; the report keeps derived facts, never page contents.
   if (f.https) f.https = { ...f.https, body: "" };
   f.ms = Date.now() - t0;
@@ -528,7 +542,7 @@ async function parsePage(net: IntelNet, html: string, base: URL, host: string, b
       if (/accounts\.google|login\.microsoftonline|auth0|okta|appleid|github\.com\/login\/oauth/.test(u.href)) auth.sso.push(u.href);
       return;
     }
-    if (links.length < 400) links.push(u.href);
+    if (links.length < 2000) links.push(u.href);
     if (/\b(log ?in|sign ?in)\b|\/login|\/signin|\/auth\b/.test(text)) auth.login.push(u.href);
     if (/\b(sign ?up|register|create account|join)\b|\/signup|\/register/.test(text)) auth.register.push(u.href);
     if (/forgot|reset|recover/.test(text)) auth.reset.push(u.href);
@@ -597,11 +611,74 @@ async function parsePage(net: IntelNet, html: string, base: URL, host: string, b
   return {
     title: $("title").first().text().trim().slice(0, 200) || null, generator: gen, lang: $("html").attr("lang") ?? null, bytes: html.length,
     forms, scripts, inlineScripts: inline.length, iframes: $("iframe[src]").map((_, el) => abs($(el).attr("src"))?.href ?? "").get().filter(Boolean).slice(0, 20),
-    links, externalHosts: [...external].sort().slice(0, 120), manifest: abs($('link[rel="manifest"]').attr("href"))?.href ?? null, spa, frameworks,
+    links, externalHosts: [...external].sort(), manifest: abs($('link[rel="manifest"]').attr("href"))?.href ?? null, favicon: abs($('link[rel~="icon" i]').first().attr("href"))?.href ?? null, spa, frameworks,
     authLinks: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, [...new Set(v)].slice(0, 10)])) as PageFacts["authLinks"],
-    paramLinks: paramLinks.slice(0, 40), redirectParams: [...new Set(redirectParams)].slice(0, 10), idRoutes: [...new Set(idRoutes)].slice(0, 20), fileRoutes: [...new Set(fileRoutes)].slice(0, 20),
+    paramLinks: paramLinks.slice(0, 500), redirectParams: [...new Set(redirectParams)].slice(0, 10), idRoutes: [...new Set(idRoutes)].slice(0, 20), fileRoutes: [...new Set(fileRoutes)].slice(0, 20),
     searchOrPaging: [...new Set(searchOrPaging)].slice(0, 10), versionedApi: [...new Set(versionedApi)].slice(0, 10),
     mixedContent: base.protocol === "https:" ? [...html.matchAll(/(?:src|href|action)=["'](http:\/\/[^"']+)/gi)].map((m) => m[1]).filter((u) => !/^http:\/\/(www\.)?w3\.org/.test(u)).slice(0, 10) : [],
-    emails: (html.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) ?? []).length, signals, secrets, thirdParty,
+    emails: (html.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) ?? []).length,
+    // Contact addresses the site itself publishes on its own domain (organisational, already public).
+    contacts: [...new Set((html.match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g) ?? []).map((e) => e.toLowerCase()).filter((e) => sameSite(e.split("@")[1], host) && !/\.(png|jpe?g|gif|svg|webp)$/.test(e)))].slice(0, 50),
+    technologies: technologiesOf(html, all, base),
+    trackingIds: [...new Set([...(html + "\n" + all).matchAll(/\b(G-[A-Z0-9]{6,12}|UA-\d{4,10}-\d{1,4}|GTM-[A-Z0-9]{4,9}|AW-\d{6,12}|pub-\d{10,20}|fbq\(['"]init['"],\s*['"](\d{10,20}))/g)].map((m) => m[2] ? `fb-pixel-${m[2]}` : m[1]))].slice(0, 40), signals, secrets, thirdParty,
   };
+}
+
+/** MurmurHash3 x86 32-bit, signed (as used for favicon hashes by internet search engines). */
+export function murmur3(data: Buffer, seed = 0): number {
+  let h = seed >>> 0;
+  const c1 = 0xcc9e2d51, c2 = 0x1b873593, n = data.length, blocks = n >> 2;
+  for (let i = 0; i < blocks; i++) {
+    let k = data.readUInt32LE(i * 4);
+    k = Math.imul(k, c1); k = (k << 15) | (k >>> 17); k = Math.imul(k, c2);
+    h ^= k; h = (h << 13) | (h >>> 19); h = (Math.imul(h, 5) + 0xe6546b64) >>> 0;
+  }
+  let k = 0;
+  const t = blocks * 4;
+  switch (n & 3) {
+    case 3: k ^= data[t + 2] << 16; // falls through
+    case 2: k ^= data[t + 1] << 8; // falls through
+    case 1: k ^= data[t]; k = Math.imul(k, c1); k = (k << 15) | (k >>> 17); k = Math.imul(k, c2); h ^= k;
+  }
+  h ^= n; h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  return h | 0;
+}
+
+/** Technologies named by markup and client code (headers and cookies are added per host in the engine). */
+function technologiesOf(html: string, code: string, base: URL): string[] {
+  const t = new Set<string>();
+  const add = (re: RegExp, name: string, src = html) => { if (re.test(src)) t.add(name); };
+  add(/\/_next\//, "Next.js"); add(/__NUXT__|\/_nuxt\//, "Nuxt"); add(/wp-content|wp-includes/, "WordPress"); add(/ng-version=/, "Angular");
+  add(/data-reactroot|react-dom|__REACT_DEVTOOLS/, "React", html + code); add(/__sveltekit|svelte-/, "Svelte"); add(/data-v-[0-9a-f]{8}|vue(?:\.runtime)?(?:\.min)?\.js/, "Vue", html + code);
+  add(/Drupal\.settings|\/sites\/default\/files/, "Drupal"); add(/cdn\.shopify\.com|Shopify\.theme/, "Shopify"); add(/static\.squarespace\.com/, "Squarespace"); add(/wix\.com|wixstatic/, "Wix");
+  add(/jquery(?:\.min)?\.js|jQuery\.fn/, "jQuery", html + code); add(/bootstrap(?:\.min)?\.(?:css|js)/, "Bootstrap"); add(/tailwind/, "Tailwind CSS"); add(/gatsby-/, "Gatsby"); add(/astro-island|data-astro/, "Astro");
+  add(/googletagmanager\.com\/gtag|google-analytics\.com/, "Google Analytics"); add(/googletagmanager\.com\/gtm/, "Google Tag Manager"); add(/connect\.facebook\.net/, "Meta Pixel");
+  add(/js\.stripe\.com/, "Stripe"); add(/recaptcha/, "reCAPTCHA"); add(/hcaptcha/, "hCaptcha"); add(/challenges\.cloudflare\.com\/turnstile/, "Cloudflare Turnstile");
+  add(/cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com/, "public JS CDN"); add(/sentry/i, "Sentry", html + code); add(/hotjar/, "Hotjar"); add(/intercom/, "Intercom"); add(/plausible\.io/, "Plausible");
+  add(/serviceWorker\.register/, "Service worker", code); add(/WebAssembly\./, "WebAssembly", code); add(/graphql/i, "GraphQL client", code);
+  void base;
+  return [...t];
+}
+
+/** Technologies named by response headers and cookie names (versions kept as given: leads, not CVE claims). */
+export function techFromHeaders(h: Record<string, string>): string[] {
+  const t: string[] = [];
+  if (h.server) t.push(`server: ${h.server.slice(0, 60)}`);
+  if (h["x-powered-by"]) t.push(`powered by: ${h["x-powered-by"].slice(0, 60)}`);
+  if (h["x-aspnet-version"] || h["x-aspnetmvc-version"]) t.push("ASP.NET");
+  if (h["x-generator"]) t.push(`generator: ${h["x-generator"].slice(0, 60)}`);
+  if (h["x-drupal-cache"] || h["x-drupal-dynamic-cache"]) t.push("Drupal");
+  if (h["x-shopify-stage"] || h["x-shopid"]) t.push("Shopify");
+  if (h["x-wix-request-id"]) t.push("Wix");
+  if (h["x-vercel-id"]) t.push("Vercel");
+  if (h["cf-ray"]) t.push("Cloudflare");
+  if (h["x-amz-cf-id"]) t.push("Amazon CloudFront");
+  if (h["x-served-by"] && /cache-/.test(h["x-served-by"])) t.push("Fastly");
+  if (h["x-railway-request-id"] || h["x-railway-edge"]) t.push("Railway");
+  if (h["fly-request-id"]) t.push("Fly.io");
+  if (h.via && /varnish/i.test(h.via)) t.push("Varnish");
+  if (/HTTP\/3|h3/.test(h["alt-svc"] ?? "")) t.push("HTTP/3");
+  const cookies = h["set-cookie"] ?? "";
+  for (const [re, name] of [[/PHPSESSID/, "PHP"], [/JSESSIONID/, "Java servlet"], [/ASP\.NET_SessionId|\.AspNetCore\./, "ASP.NET"], [/laravel_session|XSRF-TOKEN/, "Laravel"], [/csrftoken|sessionid=/, "Django"], [/_rails|_session_id/, "Ruby on Rails"], [/connect\.sid/, "Express"], [/wordpress_|wp-settings/, "WordPress"], [/__cf_bm|cf_clearance/, "Cloudflare bot management"], [/_shopify/, "Shopify"]] as Array<[RegExp, string]>) if (re.test(cookies)) t.push(name);
+  return t;
 }

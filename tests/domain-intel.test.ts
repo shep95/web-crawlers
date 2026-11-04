@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import { lookalikes, attributeProvider } from "../src/domain-intel/collect.js";
-import { normalizeTarget, runDomainIntel, verificationValue } from "../src/domain-intel/engine.js";
+import { lookalikes, attributeProvider, murmur3, techFromHeaders } from "../src/domain-intel/collect.js";
+import { DomainRun, normalizeTarget, runDomainIntel, verificationValue } from "../src/domain-intel/engine.js";
 import { dnsTypeNumber, liveNet, type DnsResult, type HttpResult, type IntelNet, type TcpResult, type TlsResult } from "../src/domain-intel/net.js";
 import { FAMILIES, RULES } from "../src/domain-intel/rules.js";
 import { registerDomainIntelRoutes } from "../src/http/domain-routes.js";
@@ -54,7 +54,7 @@ const page = `<!doctype html><html lang="en"><head><title>Fixture Shop</title><m
 <form action="/contact" method="post"><input name="email"><textarea name="message"></textarea></form>
 <form action="/upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="x"><input type="file" name="f"></form>
 <script src="/static/app.js"></script><script src="https://www.googletagmanager.com/gtag/js?id=G-1"></script><script src="https://js.stripe.com/v3/"></script>
-<script>localStorage.setItem('a','b'); window.addEventListener('message', e => document.getElementById('x').innerHTML = e.data);</script>
+<script>gtag('config','G-AB12CD34EF');localStorage.setItem('a','b'); window.addEventListener('message', e => document.getElementById('x').innerHTML = e.data);</script>
 </body></html>`;
 const appJs = `fetch("/api/v2/cart");const ws=new WebSocket("wss://live.${D}/socket");const k="${FAKE_AWS}";\n//# sourceMappingURL=app.js.map`;
 
@@ -72,7 +72,7 @@ function shopFixture(extra: { authorized?: boolean } = {}) {
     json: {
       [`https://rdap.org/domain/${D}`]: { status: ["active"], events: [{ eventAction: "registration", eventDate: "2015-01-01T00:00:00Z" }, { eventAction: "expiration", eventDate: "2026-11-24T00:00:00Z" }, { eventAction: "last changed", eventDate: "2026-10-01T00:00:00Z" }], entities: [{ roles: ["registrar"], vcardArray: ["vcard", [["fn", {}, "text", "Fixture Registrar"]]] }], nameservers: [{ ldhName: "ns1.fixture-dns.net" }], secureDNS: { delegationSigned: false } },
       [`https://crt.sh/?q=${encodeURIComponent("%." + D)}&output=json&exclude=expired&deduplicate=Y`]: [{ name_value: `${D}\nwww.${D}`, issuer_name: "C=US, O=Let's Encrypt, CN=R11", not_before: "2026-10-20T00:00:00", not_after: "2027-01-18T00:00:00" }, { name_value: `old.${D}\nstaging.${D}`, issuer_name: "C=US, O=Let's Encrypt, CN=R10", not_before: "2025-01-01T00:00:00", not_after: "2027-04-01T00:00:00" }],
-      [`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(D + "/*")}&output=json&fl=original&collapse=urlkey&limit=400`]: [["original"], [`https://${D}/wp-admin/`], [`https://${D}/backup.sql`], [`https://${D}/about`]],
+      [`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(D + "/*")}&output=json&fl=original&collapse=urlkey&limit=3000`]: [["original"], [`https://${D}/wp-admin/`], [`https://${D}/backup.sql`], [`https://${D}/about`]],
       [`https://rdap.org/ip/203.0.113.10`]: { name: "FIXTURE-HOSTING", country: "US", entities: [{ vcardArray: ["vcard", [["fn", {}, "text", "Fixture Hosting LLC"]]] }] },
     },
     http: {
@@ -159,6 +159,10 @@ describe("domain intelligence — passive run", () => {
     expect(dangling.chain.filter((s) => s.state === "not-tested")).toHaveLength(3);
     // The secret value is never in the report.
     expect(JSON.stringify(r)).not.toContain(FAKE_AWS);
+    // Pivots: tracking IDs and technologies are extracted.
+    const root = r.hosts.find((h) => h.host === D)!;
+    expect(root.page?.trackingIds).toContain("G-AB12CD34EF");
+    expect(root.technologies).toEqual(expect.arrayContaining(["WordPress 6.1.1", "PHP", "server: nginx/1.18.0", "Google Analytics"]));
     // Page bodies are not carried in the report.
     expect(r.hosts.every((h) => !h.https?.body)).toBe(true);
     // Cookie values are masked.
@@ -177,7 +181,7 @@ describe("domain intelligence — passive run", () => {
     expect(r.edges.some((e) => e.from === `old.${D}` && e.to === "fixture-shop-old.herokuapp.com" && e.kind === "CNAME")).toBe(true);
     // Decision graph path and workflow are reported for the diagrams.
     expect(r.decision).toMatchObject({ passive: true, authorized: false, web: true, auth: true, dataEndpoints: true });
-    expect(r.workflow.map((w) => w.id)).toEqual(["scope", "registration", "traverse", "analyze"]);
+    expect(r.workflow.map((w) => w.id)).toEqual(["scope", "registration", "labels", "wave-1", "analyze"]);
     expect(r.unknowns.join(" ")).toMatch(/Authorized-only checks .* were not run/);
   });
 
@@ -231,6 +235,13 @@ describe("domain intelligence — HTTP API", () => {
     const ok = await app.inject({ url: `/api/v2/domain-intel?domain=${D}` });
     expect(ok.statusCode).toBe(200);
     expect(ok.json().rules).toHaveLength(188);
+    const runId = ok.json().runId;
+    expect(runId).toMatch(/^[a-f0-9]{24}$/);
+    const cont = await app.inject({ url: `/api/v2/domain-intel/continue?run=${runId}` });
+    expect(cont.statusCode).toBe(200);
+    expect(cont.json()).toMatchObject({ runId, complete: true });
+    expect((await app.inject({ url: "/api/v2/domain-intel/continue?run=xyz" })).statusCode).toBe(400);
+    expect((await app.inject({ url: `/api/v2/domain-intel/continue?run=${"0".repeat(24)}` })).statusCode).toBe(404);
     const again = await app.inject({ url: `/api/v2/domain-intel?domain=${D}` });
     expect(again.headers["x-domain-intel-cache"]).toBe("hit");
     const v = await app.inject({ url: `/api/v2/domain-intel/verification?domain=www.${D}` });
@@ -315,3 +326,74 @@ describe("domain intelligence — regressions from the first live run", () => {
     }
   });
 });
+
+describe("domain intelligence — unbounded branching", () => {
+  it("keeps branching in waves until the frontier is empty (no host, depth or reference cap)", async () => {
+    const D2 = "branchy-fixture.com";
+    const dns: Record<string, string[] | "NX" | "ERR"> = { [`${D2}|A`]: ["203.0.113.50"] };
+    // A chain 25 hosts long: each page links to the next, far past the old 16-host / depth-3 limits.
+    const http: Record<string, Partial<HttpResult>> = {};
+    for (let i = 0; i < 25; i++) {
+      const h = i === 0 ? D2 : `n${i}.${D2}`, next = `n${i + 1}.${D2}`;
+      dns[`${h}|A`] = ["203.0.113.50"];
+      http[`https://${h}/`] = { status: 200, headers: { "content-type": "text/html" }, body: `<html><head><title>${h}</title></head><body><a href="https://${next}/">next</a></body></html>` };
+    }
+    dns[`n25.${D2}|A`] = "NX";
+    // Wave 1 only: the run reports what is left; continuing explores it.
+    const net = fixtureNet({ dns, http, json: { [`https://crt.sh/?q=${encodeURIComponent("%." + D2)}&output=json&exclude=expired&deduplicate=Y`]: [{ name_value: `san-only.${D2}`, issuer_name: "O=X", not_before: "2026-10-01", not_after: "2027-01-01" }] } });
+    let clock = NOW;
+    const run = new DomainRun(D2, { net, ownedRoots: [], secret: "x", now: () => (clock += 5) });
+    await run.init(10_000);
+    await run.wave(400); // tiny budget: forces several waves
+    const first = run.report();
+    expect(first.complete).toBe(false);
+    expect(first.frontier).toBeGreaterThan(0);
+    let waves = 1;
+    while (run.frontier > 0 && waves < 50) { await run.wave(400); waves++; }
+    const done = run.report();
+    expect(done.complete).toBe(true);
+    expect(done.waves).toBe(waves);
+    const inScope = done.hosts.filter((h) => !h.reference).map((h) => h.host);
+    expect(inScope).toContain(`n24.${D2}`);
+    expect(inScope).toContain(`n25.${D2}`); // branch recorded even though it does not resolve
+    expect(inScope).toContain(`san-only.${D2}`); // certificate-log branch
+    expect(inScope.length).toBeGreaterThan(16);
+    expect(done.rules).toHaveLength(188);
+    expect(done.workflow.filter((w) => w.id.startsWith("wave-"))).toHaveLength(waves);
+  });
+  it("turns certificate SANs and resolvable common names into branches, ignoring wildcard answers", async () => {
+    const D3 = "sans-fixture.com";
+    const net = fixtureNet({
+      dns: { [`${D3}|A`]: ["203.0.113.60"], [`api.${D3}|A`]: ["203.0.113.61"], [`void-intel-x.${D3}|A`]: [], [`mail.${D3}|A`]: [] },
+      http: { [`https://${D3}/`]: { status: 200, headers: { "content-type": "text/html" }, body: "<html><head><title>t</title></head><body></body></html>" } },
+      tls: { [D3]: { cert: { subject: `CN=${D3}`, issuer: "O=Let's Encrypt", validFrom: "2026-10-01T00:00:00Z", validTo: "2027-01-01T00:00:00Z", san: [D3, `vpn.${D3}`, "other-company.example.net"], serial: "1", fingerprint256: "AA", bits: 256, keyType: "EC", curve: "prime256v1", selfSigned: false, chainDepth: 2 } } },
+    });
+    const r = await runDomainIntel(D3, { net, ownedRoots: [], secret: "x", now: () => NOW });
+    const via = (h: string) => r.edges.find((e) => e.to === h)?.kind;
+    expect(via(`api.${D3}`)).toBe("DNS name");
+    expect(via(`vpn.${D3}`)).toBe("certificate SAN");
+    expect(r.hosts.find((h) => h.host === "other-company.example.net")?.reference).toBe(true);
+    expect(r.findings.some((f) => /Certificate key/.test(f.title))).toBe(false); // EC P-256 is not weak
+  });
+  it("hashes favicons like internet search engines (MurmurHash3 x86-32, signed) and names technologies from headers", () => {
+    expect(murmur3(Buffer.from(""))).toBe(0);
+    expect(murmur3(Buffer.from("hello"))).toBe(613153351);
+    expect(murmur3(Buffer.from("The quick brown fox jumps over the lazy dog"))).toBe(776992547);
+    expect(techFromHeaders({ server: "nginx/1.25.3", "x-powered-by": "PHP/8.2", "set-cookie": "laravel_session=x; path=/", "cf-ray": "1" })).toEqual(expect.arrayContaining(["server: nginx/1.25.3", "powered by: PHP/8.2", "Laravel", "Cloudflare"]));
+  });
+  it("a host started late in a wave is still collected completely (no silent truncation)", async () => {
+    const base = shopFixture();
+    let t = NOW;
+    const tick = <F extends (...a: never[]) => unknown>(f: F) => (async (...a: Parameters<F>) => { t += 40; return (f as unknown as (...x: unknown[]) => unknown).apply(base, a); }) as unknown as F;
+    const net = { ...base, dns: tick(base.dns), http: tick(base.http), json: tick(base.json), tls: tick(base.tls), tcp: tick(base.tcp) } as IntelNet;
+    const run = new DomainRun(D, { net, ownedRoots: [], secret: "x", now: () => t });
+    await run.init(100);
+    while (run.frontier > 0) await run.wave(50);
+    const r = run.report();
+    const withSite = r.hosts.filter((h) => !h.reference && (h.https?.status ?? 0) === 200 && /html/.test(h.https?.headers["content-type"] ?? ""));
+    expect(withSite.length).toBeGreaterThan(0);
+    for (const h of withSite) expect(h.page, h.host).not.toBeNull();
+    expect(r.findings.some((f) => /Password form submits with GET/.test(f.title))).toBe(true);
+  });
+});
+

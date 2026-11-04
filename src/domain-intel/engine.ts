@@ -28,7 +28,7 @@ export interface IntelReport {
 }
 
 const DAY = 86_400_000;
-const LIMITS = { inScopeHosts: 16, referenceHosts: 30, depth: 3, budgetMs: 50_000 };
+const LIMITS = { budgetMs: 45_000, hostBudgetMs: 30_000, domainBudgetMs: 25_000 };
 
 export function normalizeTarget(input: string): string | null {
   let s = input.trim().toLowerCase();
@@ -69,163 +69,220 @@ export function scopeRootOf(host: string): string {
 
 export interface RunOptions { net: IntelNet; ownedRoots: string[]; secret: string; now?: () => number; budgetMs?: number }
 
-export async function runDomainIntel(input: string, opts: RunOptions): Promise<IntelReport> {
-  const now = opts.now ?? Date.now;
-  const t0 = now();
-  const host = normalizeTarget(input);
-  if (!host) throw new Error("INVALID_DOMAIN");
-  const registrableDomain = registrable(host);
-  let domain = scopeRootOf(host);
-  const deadline = t0 + (opts.budgetMs ?? LIMITS.budgetMs);
-  const budget = () => now() < deadline;
-  const workflow: WorkflowStep[] = [];
-  const step = async <T>(id: string, label: string, family: string, fn: () => Promise<T>, detail: (r: T) => string): Promise<T> => {
-    const s = now();
-    const r = await fn();
-    workflow.push({ id, label, family, ms: now() - s, status: budget() ? "done" : "partial", detail: detail(r) });
-    return r;
-  };
+/** Common subdomain labels resolved through public DNS (wave 1). DNS answers only: nothing on the target is contacted for this. */
+const COMMON_LABELS = ["www", "mail", "webmail", "smtp", "imap", "pop", "mx", "ns1", "ns2", "api", "app", "apps", "dev", "staging", "stage", "test", "qa", "uat", "beta", "demo", "admin", "portal", "dashboard", "console", "vpn", "remote", "sso", "auth", "login", "id", "accounts", "cdn", "static", "assets", "img", "images", "media", "files", "docs", "help", "support", "status", "blog", "shop", "store", "pay", "billing", "git", "gitlab", "jenkins", "ci", "grafana", "kibana", "monitor", "intranet", "internal", "m", "mobile", "old", "legacy", "new", "v2", "beta2", "assets2", "autodiscover", "owa", "exchange"];
 
-  // 00-01 scope: operator-declared roots, or proof of control via a DNS TXT record on the registrable domain.
-  const verification = { record: `_void-verify.${domain}`, value: verificationValue(domain, opts.secret) };
-  const owned = opts.ownedRoots.map((r) => r.trim().toLowerCase()).filter(Boolean);
-  const declared = owned.some((r) => host === r || host.endsWith("." + r));
-  const proof = declared ? null : await opts.net.dns(verification.record, "TXT");
-  const proven = !!proof?.answers.some((a) => a.data.replace(/"/g, "") === verification.value);
-  const authorized = declared || proven;
-  const ownedRoots = authorized ? (declared ? owned.filter((r) => host === r || host.endsWith("." + r)) : [domain]) : [];
-  const inOwned = (h: string) => ownedRoots.some((r) => h === r || h.endsWith("." + r));
-  // A declared owned root narrower than the registrable domain is the scope.
-  if (declared && ownedRoots[0] && ownedRoots[0].length > domain.length && ownedRoots[0].endsWith("." + domain)) domain = ownedRoots[0];
-  const inScope = (h: string) => h === domain || h.endsWith("." + domain);
-  const platform = domain !== registrableDomain ? attributeProvider(host) : null;
-  const scope = {
-    mode: authorized ? ("authorized" as const) : ("passive" as const),
-    reason: declared ? `${host} is listed by this service's operator as an owned asset (DOMAIN_INTEL_OWNED)` : proven ? `ownership proven by ${verification.record} TXT` : "No ownership proof: passive public observation only — DNS, registration, certificate logs, archives, one TLS handshake and the public pages a browser would load. No port probes, path guessing, login attempts or injected input.",
-    ownedRoots, verification, root: domain, registrableDomain,
-    platform: platform ? `${platform.name} hosts ${host}; scope is this host only. ${registrableDomain} and the platform\u2019s other customers are dependencies, never targets (00-02).` : null,
-  };
-  workflow.push({ id: "scope", label: "Authorization and scope", family: "00", ms: 0, status: "done", detail: scope.reason });
+type Q = { host: string; depth: number; parent: string | null; via: string; reference: boolean };
 
-  const domainFacts = await step("registration", "Registration, mail, DNSSEC, certificate logs, archives, lookalikes", "01", () => collectDomain(opts.net, domain, { authorized, budget }), (d) =>
-    `${d.rdap ? `registrar ${d.rdap.registrar ?? "unknown"}` : "no RDAP"}; ${d.ct.names.length} names in CT; ${d.wayback.urls.length} archived URLs; ${d.lookalikes.filter((l) => l.resolves).length} lookalikes resolve`);
+/**
+ * One domain-intelligence run. Every new observation becomes a node; every node can branch into more
+ * nodes (rule 6 of the map). A run proceeds in waves until nothing new remains: `wave()` collects the
+ * next part of the frontier within a time budget, and `report()` re-analyses everything found so far.
+ * There is no host, depth or reference cap; references (other parties' hosts) are recorded with DNS
+ * only and never expanded or tested (00-02).
+ */
+export class DomainRun {
+  readonly id = createHmac("sha256", String(Math.random())).update(String(Date.now())).digest("hex").slice(0, 24);
+  readonly input: string; readonly host: string; domain: string; readonly registrableDomain: string;
+  private now: () => number; private t0: number;
+  scope!: IntelReport["scope"]; authorized = false; private ownedRoots: string[] = [];
+  domainFacts!: DomainFacts;
+  hosts = new Map<string, HostFacts>(); edges: IntelEdge[] = []; private edgeKeys = new Set<string>();
+  private queued = new Set<string>(); private queue: Q[] = []; private probedIps = new Set<string>();
+  workflow: WorkflowStep[] = []; waves = 0; lastUsed = Date.now();
 
-  // Recursive traversal (rule 6 of the map): every new in-scope node is collected; references stop at the boundary (00-02).
-  const hosts = new Map<string, HostFacts>();
-  const edges: IntelEdge[] = [];
-  const queued = new Set<string>();
-  type Q = { host: string; depth: number; parent: string | null; via: string; reference: boolean };
-  let queue: Q[] = [{ host, depth: 0, parent: null, via: "input", reference: false }];
-  queued.add(host);
-  const platformName = getPublicSuffix(domain, { allowPrivateDomains: true }) !== getPublicSuffix(domain);
-  if (host === domain && domain === registrableDomain && !platformName && !queued.has("www." + domain)) {
-    queue.push({ host: "www." + domain, depth: 1, parent: host, via: "conventional www", reference: false });
-    queued.add("www." + domain);
+  constructor(input: string, private opts: RunOptions) {
+    this.now = opts.now ?? Date.now;
+    this.t0 = this.now();
+    const host = normalizeTarget(input);
+    if (!host) throw new Error("INVALID_DOMAIN");
+    this.input = input; this.host = host;
+    this.registrableDomain = registrable(host);
+    this.domain = scopeRootOf(host);
   }
-  const enqueue = (h: string, parent: string, via: string, depth: number) => {
-    h = h.toLowerCase().replace(/\.$/, "");
-    if (!h || h === parent) return;
-    edges.push({ from: parent, to: h, kind: via });
-    if (queued.has(h)) return; // 00-08: link to the existing node, do not revisit
-    const reference = !inScope(h);
-    const inScopeCount = [...queued].filter((x) => inScope(x)).length;
-    const refCount = queued.size - inScopeCount;
-    if (reference ? refCount >= LIMITS.referenceHosts : inScopeCount >= LIMITS.inScopeHosts || depth > LIMITS.depth) return;
-    queued.add(h);
-    queue.push({ host: h, depth, parent, via, reference });
-  };
-  const ctCandidates = domainFacts.ct.names.filter((n) => n !== host && n !== domain && inScope(n)).sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b));
-  const traversalStart = now();
-  let rounds = 0;
-  const probedIps = new Set<string>();
-  while (queue.length && budget()) {
-    rounds++;
-    const batch = queue.splice(0, 6);
-    const done = await Promise.all(batch.map((q) => collectHost(opts.net, q.host, { depth: q.depth, parent: q.parent, via: q.via, inScope: inScope(q.host), reference: q.reference, authorized: authorized && inOwned(q.host), budget, probedIps })));
-    for (const f of done) {
-      hosts.set(f.host, f);
-      if (f.reference) continue;
-      for (const c of f.cnameChain) enqueue(c, f.host, "CNAME", f.depth + 1);
-      for (const r of f.https?.redirects ?? []) {
-        try {
-          enqueue(new URL(r.location).hostname, f.host, `redirect ${r.status}`, f.depth + 1);
-        } catch {
-          /* relative */
-        }
-      }
-      if (f.depth === 0) {
-        for (const ns of (f.dns.NS?.answers ?? []).filter((a) => a.type === 2)) enqueue(ns.data, f.host, "NS", 1);
-        for (const mx of (f.dns.MX?.answers ?? []).filter((a) => a.type === 15)) {
-          const h = mx.data.split(/\s+/)[1];
-          if (h && h !== ".") enqueue(h, f.host, "MX", 1);
-        }
-        for (const n of ctCandidates.slice(0, LIMITS.inScopeHosts)) enqueue(n, f.host, "certificate log", 1);
-      }
-      for (const l of f.page?.links ?? []) {
-        try {
-          const h = new URL(l).hostname;
-          if (h !== f.host && inScope(h)) enqueue(h, f.host, "page link", f.depth + 1);
-        } catch {
-          /* ignore */
-        }
-      }
-      for (const s of (f.page?.scripts ?? []).filter((x) => !x.firstParty).slice(0, 8)) enqueue(s.host, f.host, "third-party script", f.depth + 1);
+  inScope = (h: string) => h === this.domain || h.endsWith("." + this.domain);
+  private inOwned = (h: string) => this.ownedRoots.some((r) => h === r || h.endsWith("." + r));
+  get frontier() { return this.queue.length; }
+
+  private edge(from: string, to: string, kind: string) {
+    const k = `${from}>${to}>${kind}`;
+    if (!this.edgeKeys.has(k)) { this.edgeKeys.add(k); this.edges.push({ from, to, kind }); }
+  }
+  /** Add a node to explore. Already-known nodes only gain the edge (00-08). */
+  enqueue(h: string, parent: string, via: string, depth: number) {
+    h = h.toLowerCase().replace(/\.$/, "").replace(/^\*\./, "");
+    if (!h || h === parent || !/^[a-z0-9.-]+\.[a-z0-9-]{2,}$/.test(h) || h.length > 253) return;
+    this.edge(parent, h, via);
+    if (this.queued.has(h)) return;
+    this.queued.add(h);
+    this.queue.push({ host: h, depth, parent, via, reference: !this.inScope(h) });
+  }
+
+  async init(budgetMs = LIMITS.budgetMs) {
+    const { net, secret } = this.opts;
+    // Domain-level collection is done once and completely; it is not cut short by a small wave budget.
+    const deadline = this.now() + Math.max(budgetMs, LIMITS.domainBudgetMs);
+    const budget = () => this.now() < deadline;
+    const host = this.host;
+    // 00-01 scope: operator-declared roots, or proof of control via a DNS TXT record on the scope root.
+    const verification = { record: `_void-verify.${this.domain}`, value: verificationValue(this.domain, secret) };
+    const owned = this.opts.ownedRoots.map((r) => r.trim().toLowerCase()).filter(Boolean);
+    const declared = owned.some((r) => host === r || host.endsWith("." + r));
+    const proof = declared ? null : await net.dns(verification.record, "TXT");
+    const proven = !!proof?.answers.some((a) => a.data.replace(/"/g, "") === verification.value);
+    this.authorized = declared || proven;
+    this.ownedRoots = this.authorized ? (declared ? owned.filter((r) => host === r || host.endsWith("." + r)) : [this.domain]) : [];
+    if (declared && this.ownedRoots[0] && this.ownedRoots[0].length > this.domain.length && this.ownedRoots[0].endsWith("." + this.domain)) this.domain = this.ownedRoots[0];
+    const platform = this.domain !== this.registrableDomain ? attributeProvider(host) : null;
+    this.scope = {
+      mode: this.authorized ? "authorized" : "passive",
+      reason: declared ? `${host} is listed by this service's operator as an owned asset (DOMAIN_INTEL_OWNED)` : proven ? `ownership proven by ${verification.record} TXT` : "No ownership proof: passive public observation only — DNS, registration, certificate logs, archives, TLS handshakes and the public pages a browser would load. No port probes, path guessing, login attempts or injected input.",
+      ownedRoots: this.ownedRoots, verification, root: this.domain, registrableDomain: this.registrableDomain,
+      platform: platform ? `${platform.name} hosts ${host}; scope is this host only. ${this.registrableDomain} and the platform’s other customers are dependencies, never targets (00-02).` : null,
+    };
+    this.workflow.push({ id: "scope", label: "Authorization and scope", family: "00", ms: 0, status: "done", detail: this.scope.reason });
+
+    let s = this.now();
+    this.domainFacts = await collectDomain(net, this.domain, { authorized: this.authorized, budget });
+    const d = this.domainFacts;
+    this.workflow.push({ id: "registration", label: "Registration, mail, DNSSEC, certificate logs, archives, lookalikes", family: "01", ms: this.now() - s, status: "done", detail: `${d.rdap ? `registrar ${d.rdap.registrar ?? "unknown"}` : "no RDAP"}; ${d.ct.names.length} names in CT; ${d.wayback.urls.length} archived URLs; ${d.lookalikes.filter((l) => l.resolves).length} lookalikes resolve` });
+
+    // Seeds: the input, www, every certificate-log name, archived hostnames, SPF includes and resolvable common labels.
+    this.queued.add(host);
+    this.queue.push({ host, depth: 0, parent: null, via: "input", reference: false });
+    const platformName = getPublicSuffix(this.domain, { allowPrivateDomains: true }) !== getPublicSuffix(this.domain);
+    if (host === this.domain && this.domain === this.registrableDomain && !platformName) this.enqueue("www." + this.domain, host, "conventional www", 1);
+    for (const n of d.ct.names.filter((n) => this.inScope(n)).sort((a, b) => a.split(".").length - b.split(".").length || a.localeCompare(b))) this.enqueue(n, host, "certificate log", 1);
+    for (const u of d.wayback.urls) { try { const h = new URL(u).hostname; if (this.inScope(h)) this.enqueue(h, host, "archived URL", 1); } catch { /* ignore */ } }
+    for (const inc of d.mail.spfLookupHosts) this.enqueue(inc, host, "SPF include", 1);
+    if (!platformName && this.domain === this.registrableDomain) {
+      s = this.now();
+      const probes = COMMON_LABELS.map((l) => `${l}.${this.domain}`).filter((n) => !this.queued.has(n));
+      const res = await Promise.all(probes.map((n) => net.dns(n, "A")));
+      const wild = new Set(d.wildcard?.a ?? []);
+      let found = 0;
+      probes.forEach((n, i) => {
+        const a = res[i].answers.filter((x) => x.type === 1 || x.type === 5);
+        // Under wildcard DNS every label resolves; only names that differ from the wildcard answer are real branches.
+        if (a.length && !a.every((x) => wild.has(x.data))) { found++; this.enqueue(n, host, "DNS name", 1); }
+      });
+      this.workflow.push({ id: "labels", label: "Common subdomain names via public DNS", family: "02", ms: this.now() - s, status: "done", detail: `${probes.length} names asked, ${found} resolve${d.wildcard ? " (wildcard answers excluded)" : ""}` });
     }
   }
-  const skipped = queue.length;
-  workflow.push({ id: "traverse", label: "Recursive host traversal (DNS → network → TLS → HTTP → pages)", family: "02–05", ms: now() - traversalStart, status: skipped ? "partial" : "done", detail: `${[...hosts.values()].filter((h) => !h.reference).length} in-scope hosts collected, ${[...hosts.values()].filter((h) => h.reference).length} third-party references recorded, ${rounds} rounds${skipped ? `, ${skipped} queued hosts not reached within the time budget` : ""}` });
 
-  const hostList = [...hosts.values()];
-  const findings = analyze(domainFacts, hostList, { authorized, host, domain, now: now() });
-  workflow.push({ id: "analyze", label: "Findings, causal chains and evidence states", family: "18", ms: 0, status: "done", detail: `${findings.length} findings: ${(["critical", "high", "medium", "low", "info"] as Severity[]).map((s) => `${findings.filter((f) => f.severity === s).length} ${s}`).join(", ")}` });
-  const rules = disposition(domainFacts, hostList, findings, { authorized, host, domain, skipped });
-  const totals = { triggered: 0, clear: 0, "not-observed": 0, "not-tested": 0 } as Record<RuleStatus, number>;
-  for (const r of rules) totals[r.status]++;
-  const coverage = {
-    families: FAMILIES.map((f) => {
-      const rs = rules.filter((r) => r.family === f.id);
-      return { id: f.id, name: f.name, triggered: rs.filter((r) => r.status === "triggered").length, clear: rs.filter((r) => r.status === "clear").length, notObserved: rs.filter((r) => r.status === "not-observed").length, notTested: rs.filter((r) => r.status === "not-tested").length, total: rs.length };
-    }),
-    totals, dispositioned: rules.length, total: RULES.length,
-  };
-  // Nodes for the asset graph.
-  const nodes: IntelNode[] = [{ id: domain, type: "domain", label: domain, inScope: true, detail: domainFacts.rdap?.registrar ?? undefined }];
-  for (const h of hostList) {
-    if (h.host !== domain) nodes.push({ id: h.host, type: h.reference ? "reference" : "host", label: h.host, inScope: !h.reference, detail: h.provider ? `${h.provider.name} (${h.provider.kind})` : h.addresses.length ? `${h.addresses.length} address(es)` : "no address" });
-    if (h.host !== domain && inScope(h.host) && !edges.some((e) => e.to === h.host)) edges.push({ from: domain, to: h.host, kind: "subdomain" });
-    for (const ip of h.ips) {
-      if (!nodes.some((n) => n.id === ip.ip)) nodes.push({ id: ip.ip, type: "ip", label: ip.ip, inScope: !ip.provider && authorized, detail: [ip.network, ip.org, ip.country].filter(Boolean).join(" · ") });
-      edges.push({ from: h.host, to: ip.ip, kind: "resolves" });
+  /** Collect the next part of the frontier: breadth-first, in-scope before references, within the time budget. */
+  async wave(budgetMs = LIMITS.budgetMs) {
+    const { net } = this.opts;
+    const deadline = this.now() + budgetMs;
+    const budget = () => this.now() < deadline;
+    const s = this.now();
+    this.waves++;
+    let collected = 0, rounds = 0;
+    while (this.queue.length && budget()) {
+      rounds++;
+      this.queue.sort((a, b) => Number(a.reference) - Number(b.reference) || a.depth - b.depth);
+      const batch = this.queue.splice(0, 8);
+      // Each host gets its own collection budget: the wave budget only decides whether to start more hosts,
+      // so a host started late in a wave is still collected completely.
+      const done = await Promise.all(batch.map((q) => { const until = this.now() + LIMITS.hostBudgetMs; return collectHost(net, q.host, { depth: q.depth, parent: q.parent, via: q.via, inScope: this.inScope(q.host), reference: q.reference, authorized: this.authorized && this.inOwned(q.host), budget: () => this.now() < until, probedIps: this.probedIps }); }));
+      for (const f of done) { this.hosts.set(f.host, f); collected++; this.branch(f); }
     }
-    if (h.provider && !nodes.some((n) => n.id === "provider:" + h.provider!.name)) nodes.push({ id: "provider:" + h.provider.name, type: "provider", label: h.provider.name, inScope: false, detail: h.provider.kind });
-    if (h.provider) edges.push({ from: h.host, to: "provider:" + h.provider.name, kind: "operated by" });
+    this.workflow.push({ id: "wave-" + this.waves, label: `Wave ${this.waves}: collect and branch (DNS → network → TLS → HTTP → pages)`, family: "02–05", ms: this.now() - s, status: this.queue.length ? "partial" : "done", detail: `${collected} nodes collected in ${rounds} rounds; ${this.hosts.size} known; ${this.queue.length} still in the frontier` });
   }
-  if (host === domain || !hosts.has(domain)) {
-    /* the registrable domain node already exists */
+
+  /** Every observation that names another host becomes a branch. */
+  private branch(f: HostFacts) {
+    const at = f.depth + 1;
+    for (const c of f.cnameChain) this.enqueue(c, f.host, "CNAME", at);
+    if (f.reference) return; // other parties' hosts: recorded, never expanded (00-02)
+    for (const r of f.https?.redirects ?? []) { try { this.enqueue(new URL(r.location).hostname, f.host, `redirect ${r.status}`, at); } catch { /* relative */ } }
+    for (const ns of (f.dns.NS?.answers ?? []).filter((a) => a.type === 2)) this.enqueue(ns.data, f.host, "NS", at);
+    for (const mx of (f.dns.MX?.answers ?? []).filter((a) => a.type === 15)) { const h = mx.data.split(/\s+/)[1]; if (h && h !== ".") this.enqueue(h, f.host, "MX", at); }
+    for (const san of f.tls?.cert?.san ?? []) this.enqueue(san, f.host, "certificate SAN", at);
+    for (const ip of f.ips) for (const p of ip.ptr) this.enqueue(p, f.host, "reverse DNS", at);
+    const csp = f.https?.headers["content-security-policy"] ?? "";
+    for (const m of csp.matchAll(/https?:\/\/([a-z0-9*.-]+\.[a-z]{2,})/gi)) this.enqueue(m[1], f.host, "CSP source", at);
+    const p = f.page;
+    if (p) {
+      for (const l of p.links) { try { this.enqueue(new URL(l).hostname, f.host, "page link", at); } catch { /* ignore */ } }
+      for (const x of p.externalHosts) this.enqueue(x, f.host, "external link", at);
+      for (const sc of p.scripts) this.enqueue(sc.host, f.host, sc.firstParty ? "script" : "third-party script", at);
+      for (const fr of p.iframes) { try { this.enqueue(new URL(fr).hostname, f.host, "iframe", at); } catch { /* ignore */ } }
+      for (const w of p.signals.websocket) { try { this.enqueue(new URL(w).hostname, f.host, "websocket", at); } catch { /* ignore */ } }
+    }
+    for (const u of f.sitemap?.sample ?? []) { try { this.enqueue(new URL(u).hostname, f.host, "sitemap", at); } catch { /* ignore */ } }
+    if (f.oidc?.issuer) { try { this.enqueue(new URL(f.oidc.issuer).hostname, f.host, "OIDC issuer", at); } catch { /* ignore */ } }
   }
-  const blindRun = hostList.filter((h) => !h.reference).every((h) => h.dnsFailed.length > 0 && !h.https?.status && !h.addresses.length);
-  const unknowns = [
-    ...(blindRun ? [`The target could not be observed: ${hostList[0]?.errors[0] ?? "DNS and HTTP lookups failed"}. Nothing in this report means the domain is safe or unsafe.`] : []),
-    "Server-side code, internal networks, cloud accounts, CI/CD and logs were not visible: absence of a finding is not evidence of safety.",
-    ...(authorized ? [] : ["Authorized-only checks (exposed files, legacy TLS, CORS origin test, open-redirect test, port reachability) were not run: publish the ownership TXT record to enable them."]),
-    ...(domainFacts.ct.error ? [domainFacts.ct.error] : []), ...(domainFacts.wayback.error ? [domainFacts.wayback.error] : []), ...(domainFacts.rdapError ? [domainFacts.rdapError] : []),
-    ...(skipped ? [`${skipped} discovered hosts were queued but not collected within the time budget.`] : []),
-    "DKIM selectors cannot be listed; only common selector names were queried.",
-    "Version banners were not matched against a vulnerability database; any version shown is a lead, not a confirmed CVE (18-02).",
-  ];
-  return {
-    input, host, domain, generatedAt: new Date(t0).toISOString(), tookMs: now() - t0, scope,
-    decision: {
-      domain: true, authorized, passive: !authorized, registration: true, newHost: hostList.filter((h) => !h.reference).length > 1, network: hostList.some((h) => h.addresses.length > 0),
-      coverageOnly: hostList.filter((h) => !h.reference).length <= 1, web: hostList.some((h) => !!h.page), protocol: hostList.some((h) => !h.page && h.addresses.length > 0),
-      pages: hostList.some((h) => !!h.page), auth: hostList.some((h) => !!h.page && (h.page.authLinks.login.length > 0 || h.page.forms.some((f) => f.password) || !!h.oidc)),
-      identity: hostList.some((h) => !!h.page && (h.page.authLinks.login.length > 0 || h.page.forms.some((f) => f.password))),
-      publicIO: hostList.some((h) => !!h.page), dataEndpoints: hostList.some((h) => !!h.page && (h.page.forms.length > 0 || h.page.signals.apiCalls.length > 0 || h.page.fileRoutes.length > 0)),
-      inputs: hostList.some((h) => !!h.page && (h.page.forms.length > 0 || h.page.paramLinks.length > 0)), hypotheses: findings.length > 0, childNode: hostList.length > 1, report: true,
-    },
-    nodes, edges, hosts: hostList, domainFacts, findings, rules, coverage, workflow, unknowns,
-    limits: [`at most ${LIMITS.inScopeHosts} in-scope hosts and ${LIMITS.referenceHosts} third-party references`, `traversal depth ${LIMITS.depth}`, `${Math.round((opts.budgetMs ?? LIMITS.budgetMs) / 1000)} s time budget`, "pages: 768 KiB, first-party scripts: 4 × 1.5 MiB"],
-  };
+
+  report(): IntelReport & { runId: string; frontier: number; waves: number; complete: boolean } {
+    const { domain, host, authorized } = this;
+    const domainFacts = this.domainFacts;
+    const hostList = [...this.hosts.values()];
+    const edges = this.edges;
+    const skipped = this.queue.length;
+    const findings = analyze(domainFacts, hostList, { authorized, host, domain, now: this.now() });
+    const workflow = [...this.workflow, { id: "analyze", label: "Findings, causal chains and evidence states", family: "18", ms: 0, status: "done" as const, detail: `${findings.length} findings: ${(["critical", "high", "medium", "low", "info"] as Severity[]).map((s) => `${findings.filter((f) => f.severity === s).length} ${s}`).join(", ")}` }];
+    const rules = disposition(domainFacts, hostList, findings, { authorized, host, domain, skipped });
+    const totals = { triggered: 0, clear: 0, "not-observed": 0, "not-tested": 0 } as Record<RuleStatus, number>;
+    for (const r of rules) totals[r.status]++;
+    const coverage = {
+      families: FAMILIES.map((f) => {
+        const rs = rules.filter((r) => r.family === f.id);
+        return { id: f.id, name: f.name, triggered: rs.filter((r) => r.status === "triggered").length, clear: rs.filter((r) => r.status === "clear").length, notObserved: rs.filter((r) => r.status === "not-observed").length, notTested: rs.filter((r) => r.status === "not-tested").length, total: rs.length };
+      }),
+      totals, dispositioned: rules.length, total: RULES.length,
+    };
+    const nodes: IntelNode[] = [{ id: domain, type: "domain", label: domain, inScope: true, detail: domainFacts.rdap?.registrar ?? undefined }];
+    const extraEdges: IntelEdge[] = [];
+    const nodeIds = new Set([domain]);
+    for (const h of hostList) {
+      if (!nodeIds.has(h.host)) { nodeIds.add(h.host); nodes.push({ id: h.host, type: h.reference ? "reference" : "host", label: h.host, inScope: !h.reference, detail: h.provider ? `${h.provider.name} (${h.provider.kind})` : h.addresses.length ? `${h.addresses.length} address(es)` : "no address" }); }
+      if (h.host !== domain && this.inScope(h.host) && !edges.some((e) => e.to === h.host)) extraEdges.push({ from: domain, to: h.host, kind: "subdomain" });
+      for (const ip of h.ips) {
+        if (!nodeIds.has(ip.ip)) { nodeIds.add(ip.ip); nodes.push({ id: ip.ip, type: "ip", label: ip.ip, inScope: !ip.provider && authorized, detail: [ip.network, ip.org, ip.country].filter(Boolean).join(" · ") }); }
+        extraEdges.push({ from: h.host, to: ip.ip, kind: "resolves" });
+      }
+      if (h.provider) {
+        const pid = "provider:" + h.provider.name;
+        if (!nodeIds.has(pid)) { nodeIds.add(pid); nodes.push({ id: pid, type: "provider", label: h.provider.name, inScope: false, detail: h.provider.kind }); }
+        extraEdges.push({ from: h.host, to: pid, kind: "operated by" });
+      }
+    }
+    const blindRun = hostList.filter((h) => !h.reference).length > 0 && hostList.filter((h) => !h.reference).every((h) => h.dnsFailed.length > 0 && !h.https?.status && !h.addresses.length);
+    const unknowns = [
+      ...(blindRun ? [`The target could not be observed: ${hostList[0]?.errors[0] ?? "DNS and HTTP lookups failed"}. Nothing in this report means the domain is safe or unsafe.`] : []),
+      ...(skipped ? [`${skipped} discovered nodes are still in the frontier: continue the run to explore them.`] : []),
+      "Server-side code, internal networks, cloud accounts, CI/CD and logs were not visible: absence of a finding is not evidence of safety.",
+      ...(authorized ? [] : ["Authorized-only checks (exposed files, legacy TLS, CORS origin test, open-redirect test, port reachability) were not run: publish the ownership TXT record to enable them."]),
+      ...(domainFacts.ct.error ? [domainFacts.ct.error] : []), ...(domainFacts.wayback.error ? [domainFacts.wayback.error] : []), ...(domainFacts.rdapError ? [domainFacts.rdapError] : []),
+      "DKIM selectors cannot be listed; only common selector names were queried.",
+      "Version banners were not matched against a vulnerability database; any version shown is a lead, not a confirmed CVE (18-02).",
+    ];
+    this.lastUsed = Date.now();
+    return {
+      runId: this.id, frontier: skipped, waves: this.waves, complete: skipped === 0,
+      input: this.input, host, domain, generatedAt: new Date(this.t0).toISOString(), tookMs: this.now() - this.t0, scope: this.scope,
+      decision: {
+        domain: true, authorized, passive: !authorized, registration: true, newHost: hostList.filter((h) => !h.reference).length > 1, network: hostList.some((h) => h.addresses.length > 0),
+        coverageOnly: hostList.filter((h) => !h.reference).length <= 1, web: hostList.some((h) => !!h.page), protocol: hostList.some((h) => !h.page && h.addresses.length > 0),
+        pages: hostList.some((h) => !!h.page), auth: hostList.some((h) => !!h.page && (h.page.authLinks.login.length > 0 || h.page.forms.some((f) => f.password) || !!h.oidc)),
+        identity: hostList.some((h) => !!h.page && (h.page.authLinks.login.length > 0 || h.page.forms.some((f) => f.password))),
+        publicIO: hostList.some((h) => !!h.page), dataEndpoints: hostList.some((h) => !!h.page && (h.page.forms.length > 0 || h.page.signals.apiCalls.length > 0 || h.page.fileRoutes.length > 0)),
+        inputs: hostList.some((h) => !!h.page && (h.page.forms.length > 0 || h.page.paramLinks.length > 0)), hypotheses: findings.length > 0, childNode: hostList.length > 1 || skipped > 0, report: true,
+      },
+      nodes, edges: [...edges, ...extraEdges], hosts: hostList, domainFacts, findings, rules, coverage, workflow, unknowns,
+      limits: [`no host, depth or reference limit: the run continues in waves of about ${Math.round((this.opts.budgetMs ?? LIMITS.budgetMs) / 1000)} s until the frontier is empty`, "references (other parties' hosts) are resolved and recorded, never expanded or tested", "pages: 768 KiB, first-party scripts: 4 × 1.5 MiB per page"],
+    };
+  }
+}
+
+/** One call: scope, registration and the first wave. Use DomainRun directly to keep exploring. */
+export async function runDomainIntel(input: string, opts: RunOptions) {
+  const run = new DomainRun(input, opts);
+  const total = opts.budgetMs ?? LIMITS.budgetMs, now = opts.now ?? Date.now, t0 = now();
+  await run.init(Math.round(total * 0.5));
+  await run.wave(Math.max(1000, total - (now() - t0)));
+  return run.report();
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { normalizeTarget, runDomainIntel, scopeRootOf, verificationValue, type IntelReport } from "../domain-intel/engine.js";
+import { DomainRun, normalizeTarget, scopeRootOf, verificationValue } from "../domain-intel/engine.js";
 import { liveNet, type IntelNet } from "../domain-intel/net.js";
 import { FAMILIES, RULES } from "../domain-intel/rules.js";
 
@@ -33,7 +33,13 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
   const net = deps.net ?? liveNet;
   const owned = deps.ownedRoots ?? (process.env.DOMAIN_INTEL_OWNED ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const secret = deps.secret ?? loadSecret();
-  const cache = new Map<string, { at: number; report: Promise<IntelReport> }>();
+  type Report = ReturnType<DomainRun["report"]>;
+  const cache = new Map<string, { at: number; report: Promise<Report> }>();
+  // Runs kept for continuation: each continue explores the next wave of the frontier.
+  const runs = new Map<string, { run: DomainRun; busy: boolean; client: string }>();
+  const waveTimes = new Map<string, number[]>();
+  const RUN_TTL = 60 * 60_000, MAX_RUNS = 40, WAVES_PER_HOUR = 600;
+  const sweep = () => { for (const [id, r] of runs) if (Date.now() - r.run.lastUsed > RUN_TTL) runs.delete(id); while (runs.size > MAX_RUNS) runs.delete(runs.keys().next().value!); };
   const perClient = new Map<string, number[]>();
   let running = 0;
   const MAX_RUNNING = 3, PER_HOUR = 20, TTL = 10 * 60_000;
@@ -73,7 +79,15 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
     perClient.set(client, times);
     if (perClient.size > 5000) perClient.delete(perClient.keys().next().value!);
     running++;
-    const report = runDomainIntel(host, { net, ownedRoots: owned, secret, budgetMs: deps.budgetMs }).finally(() => running--);
+    const report = (async () => {
+      const run = new DomainRun(host, { net, ownedRoots: owned, secret, budgetMs: deps.budgetMs });
+      const total = deps.budgetMs ?? 45_000, t0 = Date.now();
+      await run.init(Math.round(total * 0.5));
+      await run.wave(Math.max(1000, total - (Date.now() - t0)));
+      sweep();
+      runs.set(run.id, { run, busy: false, client });
+      return run.report();
+    })().finally(() => running--);
     cache.set(host, { at: Date.now(), report });
     if (cache.size > 200) cache.delete(cache.keys().next().value!);
     try {
@@ -84,6 +98,35 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
       cache.delete(host);
       app.log.warn({ err: (e as Error).message, host }, "domain_intel_failed");
       return reply.code(502).send({ error: "DOMAIN_INTEL_FAILED", message: "The run could not complete. Try again shortly." });
+    }
+  });
+
+  // Continue a run: one more wave of the frontier, then the whole report re-analysed. Repeat until complete.
+  app.get("/api/v2/domain-intel/continue", async (req, reply) => {
+    const id = String((req.query as Record<string, string>).run ?? "");
+    if (!/^[a-f0-9]{24}$/.test(id)) return reply.code(400).send({ error: "INVALID_RUN" });
+    sweep();
+    const entry = runs.get(id);
+    if (!entry) return reply.code(404).send({ error: "RUN_EXPIRED", message: "This run is no longer held (runs are kept for an hour). Start a new run." });
+    if (entry.busy) return reply.code(409).header("retry-after", "5").send({ error: "WAVE_IN_PROGRESS", message: "A wave of this run is already in progress." });
+    if (entry.run.frontier === 0) return entry.run.report();
+    const times = (waveTimes.get(entry.client) ?? []).filter((t) => Date.now() - t < 3_600_000);
+    if (times.length >= WAVES_PER_HOUR) return reply.code(429).header("retry-after", "300").send({ error: "RATE_LIMITED", message: `At most ${WAVES_PER_HOUR} waves per hour per client.` });
+    if (running >= MAX_RUNNING) return reply.code(503).header("retry-after", "10").send({ error: "BUSY", message: "Other domain runs are in progress. Try again in a few seconds." });
+    times.push(Date.now());
+    waveTimes.set(entry.client, times);
+    entry.busy = true;
+    running++;
+    try {
+      await entry.run.wave(deps.budgetMs ?? 45_000);
+      reply.header("cache-control", "no-store");
+      return entry.run.report();
+    } catch (e) {
+      app.log.warn({ err: (e as Error).message, run: id }, "domain_intel_wave_failed");
+      return reply.code(502).send({ error: "DOMAIN_INTEL_FAILED", message: "This wave could not complete. Try continuing again." });
+    } finally {
+      entry.busy = false;
+      running--;
     }
   });
 }

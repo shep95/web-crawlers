@@ -14,6 +14,8 @@ export interface DnsResult { status: number; ad: boolean; answers: DnsAnswer[]; 
 export interface HttpResult {
   url: string; finalUrl: string; status: number; headers: Record<string, string>; body: string; truncated: boolean;
   redirects: Array<{ url: string; status: number; location: string }>; remoteAddress: string | null; ms: number; error?: string;
+  /** Original bytes, only when requested with raw: true. */
+  bytes?: Buffer;
 }
 export interface TlsResult {
   host: string; port: number; ok: boolean; error?: string; protocol?: string | null; cipher?: string | null; alpn?: string | null;
@@ -23,7 +25,7 @@ export interface TlsResult {
 export interface TcpResult { host: string; port: number; open: boolean; banner?: string; error?: string; ms: number }
 export interface IntelNet {
   dns(name: string, type: string): Promise<DnsResult>;
-  http(url: string, opts?: { method?: "GET" | "HEAD"; maxBytes?: number; headers?: Record<string, string>; follow?: boolean; timeoutMs?: number }): Promise<HttpResult>;
+  http(url: string, opts?: { method?: "GET" | "HEAD"; maxBytes?: number; headers?: Record<string, string>; follow?: boolean; timeoutMs?: number; raw?: boolean }): Promise<HttpResult>;
   json<T>(url: string, timeoutMs?: number): Promise<T | null>;
   tls(host: string, opts?: { port?: number; minVersion?: "TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3"; maxVersion?: "TLSv1" | "TLSv1.1" | "TLSv1.2" | "TLSv1.3"; timeoutMs?: number }): Promise<TlsResult>;
   tcp(host: string, port: number, opts?: { readBanner?: boolean; send?: string; smtpEhlo?: string; timeoutMs?: number }): Promise<TcpResult>;
@@ -69,7 +71,7 @@ export const liveNet: IntelNet = {
         maxRedirects: opts.follow === false ? 0 : 6, headers: opts.headers,
         userAgent: "VoidDomainIntel/1.0 (+https://github.com/shep95/web-crawlers; passive public observation)",
       });
-      return { url, finalUrl: res.finalUrl, status: res.status, headers: res.headers, body: res.body.toString("utf8"), truncated: res.truncated, redirects: res.redirects, remoteAddress: res.remoteAddress, ms: Date.now() - t0 };
+      return { url, finalUrl: res.finalUrl, status: res.status, headers: res.headers, body: res.body.toString("utf8"), truncated: res.truncated, redirects: res.redirects, remoteAddress: res.remoteAddress, ms: Date.now() - t0, ...(opts.raw ? { bytes: res.body } : {}) };
     } catch (e) {
       return { url, finalUrl: url, status: 0, headers: {}, body: "", truncated: false, redirects: [], remoteAddress: null, ms: Date.now() - t0, error: (e as Error).message.slice(0, 200) };
     }
