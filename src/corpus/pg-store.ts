@@ -410,6 +410,8 @@ export class PgCorpus implements Corpus {
     try {
       await client.query("BEGIN READ ONLY");
       await client.query("SET LOCAL max_parallel_workers_per_gather = 0");
+      // A background dashboard build may take minutes on a large corpus; the limit applies to this transaction only.
+      await client.query(`SET LOCAL statement_timeout = '${Number(process.env.COVERAGE_STATEMENT_TIMEOUT_MS ?? 600_000)}ms'`);
       const out = await collectCoverage(async (sql) => (await client.query(sql)).rows, PG_DIALECT, this.backend, now);
       await client.query("COMMIT");
       return out;

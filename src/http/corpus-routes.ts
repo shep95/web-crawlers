@@ -73,29 +73,40 @@ function cachedStats(store: Corpus) {
 export function registerCorpusRoutes(app: FastifyInstance, deps: { store: Corpus; crawlers: AutonomousCrawler[]; keys: ApiKeys; topicalDiscovery: boolean; countries?: () => CountryEntry[] | null }) {
   const { store, crawlers, keys } = deps;
 
-  // Coverage aggregates scan the whole resources table: computed at most once per TTL per replica, single-flight.
-  const COVERAGE_TTL = Number(process.env.COVERAGE_CACHE_TTL_MS ?? 60_000);
-  let coverageCache: { at: number; value: Promise<CoverageReport & { tookMs: number }> } | null = null;
+  // Coverage aggregates scan whole tables (minutes on a large production corpus). They are built in the
+  // background, single-flight per replica; requests get the last completed report with its age, and
+  // only the very first request waits (briefly) before being told to come back.
+  const COVERAGE_TTL = Number(process.env.COVERAGE_CACHE_TTL_MS ?? 10 * 60_000);
+  type Built = CoverageReport & { tookMs: number };
+  let coverageLast: { at: number; value: Built } | null = null;
+  let coverageInflight: Promise<Built> | null = null;
+  let coverageError: { at: number; message: string } | null = null;
   const countryRegistry = loadCountryRegistry();
-  const coverageReport = () => {
-    if (!coverageCache || Date.now() - coverageCache.at > COVERAGE_TTL) {
-      const t0 = Date.now();
-      const value = (async () => {
-        const injected = deps.countries?.() ?? null;
-        const geo = injected ? { list: injected, source: "injected" } : await countryRegistry;
-        const raw = await store.coverageRaw(Date.now());
-        return { ...buildCoverageReport(raw, { countries: geo?.list ?? null, registrySource: geo?.source }), tookMs: Date.now() - t0 };
-      })();
-      coverageCache = { at: Date.now(), value };
-      value.catch(() => (coverageCache = null));
-    }
-    return coverageCache;
+  const refreshCoverage = () => {
+    if (coverageInflight) return coverageInflight;
+    const t0 = Date.now();
+    coverageInflight = (async () => {
+      const injected = deps.countries?.() ?? null;
+      const geo = injected ? { list: injected, source: "injected" } : await countryRegistry;
+      const raw = await store.coverageRaw(Date.now());
+      return { ...buildCoverageReport(raw, { countries: geo?.list ?? null, registrySource: geo?.source }), tookMs: Date.now() - t0 };
+    })();
+    coverageInflight.then(
+      (value) => { coverageLast = { at: Date.now(), value }; coverageError = null; },
+      (e) => { coverageError = { at: Date.now(), message: String((e as Error).message ?? e).slice(0, 200) }; app.log.warn({ err: coverageError.message }, "coverage_refresh_failed"); },
+    ).finally(() => (coverageInflight = null));
+    return coverageInflight;
   };
   app.get("/api/v2/coverage", async (_req, reply) => {
-    const c = coverageReport();
-    const body = await c.value;
+    if (!coverageLast || Date.now() - coverageLast.at > COVERAGE_TTL) void refreshCoverage().catch(() => undefined);
+    if (!coverageLast && coverageInflight) await Promise.race([coverageInflight.catch(() => undefined), new Promise((r) => setTimeout(r, 8000))]);
+    const last = coverageLast as { at: number; value: Built } | null;
+    if (!last) {
+      if (coverageError && !coverageInflight) return reply.code(503).header("retry-after", "60").send({ error: "COVERAGE_UNAVAILABLE", message: "The coverage report could not be built; retrying in the background.", detail: coverageError.message });
+      return reply.code(202).header("retry-after", "30").send({ status: "computing", message: "The coverage report is being built from the whole corpus. Try again in about 30 seconds." });
+    }
     reply.header("cache-control", "public, max-age=30");
-    return { ...body, cache: { ttlSeconds: COVERAGE_TTL / 1000, ageSeconds: Math.round((Date.now() - c.at) / 1000) } };
+    return { ...last.value, cache: { ttlSeconds: COVERAGE_TTL / 1000, ageSeconds: Math.round((Date.now() - last.at) / 1000), refreshing: !!coverageInflight, lastRefreshError: coverageError?.message ?? null } };
   });
 
   app.get("/api/v2/capabilities", async () => {
