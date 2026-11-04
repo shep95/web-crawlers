@@ -5,6 +5,7 @@
  */
 import type { Corpus, SearchCandidate, StoredText } from "../corpus/types.js";
 import { fold, parsePersonQuery, type PersonQuery } from "./parse.js";
+import { excludedHosts, isExcludedHost } from "../corpus/host-policy.js";
 import { birthAgreement, dateKey, isoOf, maskContacts, nameMatcher, readPage, type BirthFact, type PersonEvent } from "./extract.js";
 
 export const PERSON_LIMITS = { candidatePages: 400, readBatch: 40, budgetMs: 20_000, maxResults: 200, maxEvents: 1000 };
@@ -47,7 +48,8 @@ const toIso = (s: string | null | undefined) => {
 
 /** Publication dates outside printing-to-next-year (a "1025" typo for 2025, a far-future date) are not dates. */
 const plausible = (iso: string | null) => {
-  if (!iso) return null;
+  // 1970-01-01T00:00:00Z is the zero timestamp a server sends when it has no date.
+  if (!iso || iso.startsWith("1970-01-01T00:00:00")) return null;
   const y = +iso.slice(0, 4);
   return y >= 1450 && y <= new Date().getUTCFullYear() + 1 ? iso : null;
 };
@@ -71,6 +73,7 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
 
   // Candidates: pages with every word of the name; then the same with the location words, merged.
   const cand = new Map<number, SearchCandidate>();
+  const excluded = excludedHosts();
   let indexTotal = 0, lowerBound = false;
   const errors: string[] = [];
   const pull = async (words: string[], pages: number) => {
@@ -80,7 +83,8 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
         return { rows: [] as SearchCandidate[], total: 0, totalIsLowerBound: false };
       });
       if (words === nameTerms && p === 0) { indexTotal = r.total; lowerBound = !!r.totalIsLowerBound; }
-      for (const row of r.rows) if (!row.duplicate_of && !cand.has(row.id)) cand.set(row.id, row);
+      // Excluded hosts (Wikipedia and Wikimedia) never answer, including pages indexed before the exclusion.
+      for (const row of r.rows) if (!row.duplicate_of && !cand.has(row.id) && !isExcludedHost(row.host, excluded)) cand.set(row.id, row);
       if (r.rows.length < 100 || Date.now() - t0 > PERSON_LIMITS.budgetMs / 2) break;
     }
   };

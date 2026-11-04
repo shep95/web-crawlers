@@ -145,6 +145,8 @@ const PAGES: Array<{ url: string; title: string; body: string; published: string
   { url: "https://awards.example.org/2019", title: "2019 innovation awards", published: "2019-11-20", body: "The 2019 award went to Maria Delgado of Austin for her robotics work. Maria Delgado said the team deserved it." },
   { url: "https://lisbon.example.pt/artes/delgado", title: "Pintora Maria Delgado", published: "2012-02-02", body: "Maria Delgado (born 1951) is a painter from Lisbon. In 1975 Maria Delgado held her first exhibition." },
   { url: "https://blog.example.net/undated", title: "Notes", published: null, body: "Yesterday I read about Maria Delgado and robotics." },
+  { url: "https://en.wikipedia.org/wiki/Maria_Delgado", title: "Maria Delgado - Wikipedia", published: "2020-01-01", body: "Maria Delgado (born June 12, 1984) is an engineer." },
+  { url: "https://epoch.example.org/p", title: "Epoch", published: "1970-01-01T00:00:00Z", body: "Maria Delgado spoke at the meetup." },
   { url: "https://noise.example.com/scatter", title: "Maria and friends", published: "2015-01-01", body: "Maria went to the market. Later, Delgado Street was closed." },
 ];
 
@@ -171,9 +173,12 @@ for (const make of backends()) {
     it("finds only pages that name the person, ordered by page date with undated last", async () => {
       const r = await personSearch(store, "@human Maria Delgado");
       expect(r.results.map((x) => x.url)).not.toContain("https://noise.example.com/scatter");
-      expect(r.summary.pages).toBe(5);
+      // Wikipedia is excluded; a 1970-01-01 zero timestamp is no date.
+      expect(r.results.some((x) => x.host.endsWith("wikipedia.org"))).toBe(false);
+      expect(r.summary.pages).toBe(6);
       const dates = r.results.map((x) => x.pageDate?.iso.slice(0, 10) ?? null);
-      expect(dates).toEqual(["2010-03-15", "2012-02-02", "2016-05-01", "2019-11-20", null]);
+      expect(dates.slice(0, 4)).toEqual(["2010-03-15", "2012-02-02", "2016-05-01", "2019-11-20"]);
+      expect(dates.slice(4)).toEqual([null, null]);
       const desc = await personSearch(store, "@human Maria Delgado", { dir: "desc" });
       expect(desc.results[0].pageDate?.iso.slice(0, 10)).toBe("2019-11-20");
     });
