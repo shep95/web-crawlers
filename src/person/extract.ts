@@ -170,6 +170,8 @@ export function readPage(doc: { title: string; description: string; body: string
     // not "Jane and Doe").
     const words = text.slice(m.index, m.index + m[0].length).split(/\s+/);
     if (q.tokens.length === 2 && words.length === 3 && !/^\p{Lu}/u.test(words[1])) continue;
+    // Places named after a person (streets, buildings, prizes, a bay or a city) are not mentions of them.
+    if (namesPlace(text, m.index, m.index + m[0].length)) continue;
     spans.push([m.index, m.index + m[0].length]);
     if (spans.length > 400) break;
   }
@@ -204,7 +206,7 @@ export function readPage(doc: { title: string; description: string; body: string
       const at = m.index;
       if (spans.some(([a, b]) => at >= a && at < b)) continue;
       if (!/^\p{Lu}/u.test(text[at])) continue;
-      if (/^\s+(?:street|st\.?|avenue|ave|road|rd|boulevard|lane|drive|park|county|city|hall|school|university|college|institute|foundation|prize|award|building|centre|center|bridge|river|lake|mountain|station|island)\b/i.test(text.slice(at + m[0].length, at + m[0].length + 14))) continue;
+      if (namesPlace(text, at, at + m[0].length)) continue;
       const [a, b] = sentenceAround(text, at, at + m[0].length);
       if (seen.has(`${a}:${b}`) || sentences.some((x) => a < x.b && b > x.a)) continue;
       seen.add(`${a}:${b}`);
@@ -278,6 +280,15 @@ export function readPage(doc: { title: string; description: string; body: string
   const matched: string[] = [], missing: string[] = [];
   for (const part of q.locationParts) (new RegExp(`(?<!${L})${esc(part)}(?!${L})`, "u").test(folded) ? matched : missing).push(part);
   return { mentions: spans.length, inTitle, sentences: out, events: dedupeEvents(events), birth, death, location: { matched, missing }, roles: [...roles], masked };
+}
+
+const PLACE_AFTER = /^(?:,?\s+(?:jr|sr)\.?,?)?\s+(?:street|st\b\.?|avenue|ave\b\.?|road|rd\b\.?|boulevard|blvd\b\.?|lane|ln\b\.?|drive|dr\b\.?|way|place|square|plaza|parkway|pkwy|highway|hwy|expressway|freeway|bridge|tunnel|park|bay|county|city|town|district|municipality|hall|school|high school|elementary|academy|university|college|institute|hospital|medical center|library|museum|foundation|prize|award|medal|fellowship|scholarship|building|tower|centre|center|stadium|arena|airport|station|river|lake|mountain|island|metro|campus)\b/i;
+/** True when the name at [s, e) is part of a place or institution named after the person, or a street address. */
+export function namesPlace(text: string, s: number, e: number): boolean {
+  if (PLACE_AFTER.test(text.slice(e, e + 30))) return true;
+  // A house number right before the name ("410 Maria Delgado …"); a year ("In 2006 Maria Delgado") is not one.
+  const n = text.slice(Math.max(0, s - 14), s).match(/\b(\d{1,6})\s+(?:(?:north|south|east|west|n|s|e|w)\.?\s+)?$/i);
+  return !!n && !/^(?:1[0-9]{3}|20[0-9]{2})$/.test(n[1]);
 }
 
 const CLIP = 420;

@@ -4,7 +4,7 @@ import { backends } from "./helpers/backends.js";
 import type { Corpus } from "../src/corpus/types.js";
 import type { ResourceRecord } from "../src/metadata/types.js";
 import { parseBirthday, parsePersonQuery, splitLocation, fold } from "../src/person/parse.js";
-import { birthAgreement, findDates, maskContacts, nameMatcher, readPage } from "../src/person/extract.js";
+import { birthAgreement, findDates, maskContacts, nameMatcher, namesPlace, readPage } from "../src/person/extract.js";
 import { personSearch } from "../src/person/search.js";
 import { registerPersonRoutes } from "../src/http/person-routes.js";
 // @ts-expect-error plain ES module shared with the live runner
@@ -119,6 +119,12 @@ describe("person page reading", () => {
     const r = readPage({ title: "", description: "", body }, q, re, 2000);
     expect(r.birth).toEqual([]);
     expect(r.death).toBeNull();
+  });
+  it("does not count places named after the person as mentions", () => {
+    const r = readPage({ title: "", description: "", body: "Our office is at 1200 Maria Delgado Blvd. The Maria Delgado Prize opens in May. Maria Delgado High School closed." }, q, re, 2020);
+    expect(r.mentions).toBe(0);
+    expect(namesPlace("visit Maria Delgado Jr. Avenue", 6, 19)).toBe(true);
+    expect(namesPlace("Maria Delgado said", 0, 13)).toBe(false);
   });
   it("masks phone numbers but not year ranges", () => {
     expect(maskContacts("Call +1 512 555 0199 today").text).toBe("Call [phone hidden] today");

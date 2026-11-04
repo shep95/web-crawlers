@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 export const QUESTIONS = JSON.parse(readFileSync(new URL("../tests/fixtures/person-questions.json", import.meta.url), "utf8"));
 
-const fold = (s) => [...String(s ?? "")].map((c) => { const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase(); return f.length === c.length ? f : c; }).join("");
+const fold = (s) => [...String(s ?? "")].map((c) => { const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase(); return f.length === c.length ? f : c; }).join("").replace(/[’‘]/g, "'");
 const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
 const PHONE = /(?:\+?\d{1,3}[\s.-]?)?\(\d{3}\)[\s.-]?\d{3}[\s.-]\d{4}\b/;
 

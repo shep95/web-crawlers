@@ -125,6 +125,11 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
   }
   timings.read = Date.now() - t0 - timings.candidates;
 
+  // A timeline begins at birth: once the birth year is known (given, or stated by most matching pages),
+  // dates before it on those pages are about something else (other people in a list, history) and are dropped.
+  const birthYear = q.born?.y ?? consensusBirth(results);
+  if (birthYear) for (const r of results) if (r.verdict !== "other") r.events = r.events.filter((e) => e.date.y >= birthYear);
+
   // Namesakes: pages that state a birth year are clustered by it (±1 for ages); the rest join the cluster
   // their location agrees with, else stay "unattributed".
   const people = clusterPeople(results, q);
@@ -196,6 +201,16 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
     tookMs: Date.now() - t0,
     ms: timings,
   };
+}
+
+/** The stated birth year most matching pages agree on (at least two pages, or one when it is the only one). */
+function consensusBirth(results: PersonResult[]): number | null {
+  const n = new Map<number, number>();
+  for (const r of results) if (r.verdict === "match") for (const f of r.match.birthFacts) if (f.how === "stated") n.set(f.y, (n.get(f.y) ?? 0) + 1);
+  const ranked = [...n.entries()].sort((a, b) => b[1] - a[1]);
+  if (!ranked.length) return null;
+  if (ranked.length === 1 || ranked[0][1] >= 2 && ranked[0][1] > (ranked[1]?.[1] ?? 0)) return ranked[0][0];
+  return null;
 }
 
 function clusterPeople(results: PersonResult[], q: PersonQuery) {
