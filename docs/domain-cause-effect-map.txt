@@ -1,0 +1,1099 @@
+domain cybersecurity audit — recursive cause-and-effect map
+
+purpose. show what a domain-security assessment discovers, which checks each observation triggers, why it triggers them, what evidence distinguishes risk from fact, and exactly where a branch stops. this is an audit decision model, not a claim that every domain exposes all of these technologies.
+
+epistemic scope. the branch collection below is extensive but not mathematically exhaustive: future technologies, novel vulnerabilities, site-specific business rules and inaccessible systems always introduce new nodes. “complete” means *every observed, authorized, applicable asset and check has a recorded disposition* at a defined point in time.
+
+rules of traversal.
+
+1. authorization and explicit scope precede intrusive work. discovering a service does not grant permission to test it.
+2. every new observation becomes an asset, service, interface, data flow, trust boundary, or finding node.
+3. apply only applicable checks; a static page does not need a password-reset audit, and a database-backed payment service does.
+4. distinguish observed, hypothesized, validated, not applicable, blocked/not tested, and remediated and retested.
+5. cause → effect assertions require validated mechanisms; mere co-occurrence is a possible relationship, not proof.
+6. follow newly discovered in-scope child nodes until there are no new applicable checks, or access/safety boundaries terminate a path.
+
+top-level decision graph
+
+decision graph (mermaid notation):
+flowchart TD
+  D[domain entered] --> S{authorized scope?}
+  S -- no --> P[passive public observations only; no intrusive testing]
+  S -- yes --> R[registration + DNS + certificates + history]
+  R --> H{new in-scope host or service?}
+  H -- yes --> E[network + TLS + HTTP + mail + cloud classification]
+  H -- no --> C[record coverage / historical hints]
+  E --> W{web application?}
+  W -- yes --> U[pages + routes + inputs + identities + APIs]
+  W -- no --> V[protocol-specific control review]
+  U --> T{authentication or user roles?}
+  T -- yes --> I[identity + sessions + authorization + tenants]
+  T -- no --> X[public input/output and configuration tests]
+  U --> A{data or action endpoints?}
+  A -- yes --> B[input + workflow + business logic + data protection]
+  A -- no --> X
+  I --> F[record risk hypotheses and run approved verification]
+  B --> F
+  X --> F
+  V --> F
+  F --> N{new in-scope child node?}
+  N -- yes --> E
+  N -- no --> Q[coverage + evidence + fixes + retests + unknowns]
+
+how to read the conditional rules
+
+Each row supplies if observed → inspect next → if the concern is confirmed → otherwise. The columns represent branching decisions, not proof that the concern exists. Every row should be opened only after its precondition is satisfied. A rule may launch another category (for example DNS → mail → identity), creating a graph rather than a simple linear checklist.
+
+worked causal chain: eight levels deep
+
+1. if an authorized domain has a CNAME, then follow its canonical destination.
+2. if the destination points at a third-party hosting service, then identify whether the resource is still claimed by its legitimate owner.
+3. if the DNS points at an unclaimed service resource, then consider a dangling-DNS/takeover hypothesis; do not claim takeover yet.
+4. if the owner confirms the resource is unclaimed and permits safe verification, then test whether the provider actually lets a different account claim the referenced name without taking over production traffic.
+5. if provider behavior confirms that possibility, then map what content or trust would be affected for that hostname.
+6. if browsers or users trust the hostname for cookies, links, scripts or login flows, then trace those specific dependencies and boundaries.
+7. if a dependency makes takeover consequential under a safe proof, then record the validated impact; otherwise record exposure with uncertainty.
+8. then remediate by removing/repointing stale DNS or reclaiming the destination, and retest DNS, hostname content and dependent services.
+
+other complete paths:
+
+• web page → API call → resource ID → logged-in account → ownership boundary → alternative test account → authorized/denied → evidence → fix/retest
+• login form → session cookie → Secure/HttpOnly/SameSite → session lifecycle → logout → server revocation → stale token accepted/rejected → severity/retest
+• file upload → parser → content validation → storage → execution isolation → retrieval permissions → metadata/privacy → logs → evidence/retest
+• cloud hostname → cloud account ownership → IAM identity → privilege policy → data access → blast radius → audit logging → remediation/retest
+
+coverage: 19 category families, 188 explicit branching rules
+
+00. authorization, scope, and evidence
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+00-01 · if: A target domain is supplied  
+then inspect: Define the exact authorized roots, environments, IPs, apps, test windows, and excluded third parties  
+if confirmed / positive: If written authorization covers the asset, permit the agreed testing class; otherwise use only lawfully available passive information  
+otherwise / stop: If no permission, do not attempt intrusive tests, login guessing, access to private content, or disruptive probes
+
+00-02 · if: A hostname resolves to a vendor/CDN/third-party network  
+then inspect: Attribute the owner and contractual scope before treating it as an asset  
+if confirmed / positive: If explicitly included, assess within rules; otherwise document dependency and seek permission  
+otherwise / stop: Stop at ownership boundary; a DNS link is not authorization
+
+00-03 · if: An asset is newly discovered  
+then inspect: Record source, discovery time, hostname, IP, URL, service, confidence, and parent relation  
+if confirmed / positive: If new and in scope, enqueue appropriate child categories  
+otherwise / stop: If duplicated or out of scope, link as reference and stop expansion
+
+00-04 · if: An input or page exposes a potentially sensitive resource  
+then inspect: Determine whether authorization allows inspection without collecting private content  
+if confirmed / positive: If allowed, use minimal non-sensitive proof and protect evidence  
+otherwise / stop: Otherwise record only the indicator and recommend owner review
+
+00-05 · if: A test may alter data, send messages, charge money, or interrupt service  
+then inspect: Require a safe sandbox, approved method and rollback criteria  
+if confirmed / positive: If safety guaranteed, run minimal verification; otherwise use configuration review  
+otherwise / stop: No destructive confirmation against production without authorization
+
+00-06 · if: A finding is inferred from a banner, version, or pattern  
+then inspect: Separate observation, hypothesis, confirmed weakness, verified impact, and unknown  
+if confirmed / positive: If evidence supports a safe validation, test carefully  
+otherwise / stop: If not, report as unverified rather than vulnerable
+
+00-07 · if: An asset disappears or changes during testing  
+then inspect: Timestamp the observation and inspect change history  
+if confirmed / positive: If transient, retry within scope and compare results  
+otherwise / stop: If no longer available, retain historical record with no present-tense exposure claim
+
+00-08 · if: A branch spawns another branch already explored  
+then inspect: Record edge to existing node rather than revisit endlessly  
+if confirmed / positive: If version/state changed, reopen affected tests  
+otherwise / stop: If unchanged, stop to avoid cycles
+
+01. domain and registration identity
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+01-01 · if: A registered domain exists  
+then inspect: Review RDAP, registrar, registration status, dates, contact/abuse routes, and expiration policy  
+if confirmed / positive: If unexpected ownership or expiration issue, investigate transfer/renewal controls  
+otherwise / stop: If records are private/limited, mark missing evidence rather than invent owner
+
+01-02 · if: A domain uses a registrar  
+then inspect: Review registrar account MFA, registry lock, transfer protections, recovery contacts, change approval  
+if confirmed / positive: If weak controls, investigate hijack risk and remediation  
+otherwise / stop: If access to registrar configuration unavailable, external audit ends at observable signals
+
+01-03 · if: A domain shares organizational naming patterns  
+then inspect: Discover documented related brands, alternate TLDs, ccTLDs, internationalized variants, and redirects  
+if confirmed / positive: If in scope and independently attributable, add domains as new roots  
+otherwise / stop: Similar names alone do not prove shared ownership
+
+01-04 · if: A name is internationalized or visually confusable  
+then inspect: Review Unicode IDNA representation, homograph risks, display consistency and phishing exposure  
+if confirmed / positive: If owned by organization, review controls and redirects  
+otherwise / stop: If unrelated, treat as brand-monitoring intelligence, not an asset to test
+
+01-05 · if: An old or alternate domain redirects to a new domain  
+then inspect: Map complete redirect chain and protocol, status, query-string handling  
+if confirmed / positive: If redirect leads to controlled host, follow in-scope branch  
+otherwise / stop: If it reaches third party, record edge and stop active testing
+
+01-06 · if: Domain registration or ownership history changes  
+then inspect: Compare timestamps to infrastructure and DNS history  
+if confirmed / positive: If coincident exposure changes, prioritize verification  
+otherwise / stop: A timestamp correlation alone is not a causal proof
+
+02. DNS and naming tree
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+02-01 · if: An NS record exists  
+then inspect: Identify authoritative nameservers, delegation consistency, geographic/provider diversity, and stale delegation  
+if confirmed / positive: If inconsistent or dangling, review service control and takeover exposure  
+otherwise / stop: If externally owned service, scope-check before querying beyond normal resolution
+
+02-02 · if: An A or AAAA record exists  
+then inspect: Resolve IPv4/IPv6, compare DNS answers, ports, TLS, hosting, and routing  
+if confirmed / positive: If reachable in scope, create host/service branches  
+otherwise / stop: If not reachable, preserve DNS-only observation; do not label secure
+
+02-03 · if: A CNAME or ALIAS points elsewhere  
+then inspect: Resolve the entire chain, assess destination service ownership and claimed resource status  
+if confirmed / positive: If dangling to an unclaimed service, request safe owner verification of takeover risk  
+otherwise / stop: If legitimately claimed, classify the provider and continue to host/application mapping
+
+02-04 · if: An MX record exists  
+then inspect: Identify inbound mail host and provider; branch to email transport and mail authentication  
+if confirmed / positive: If misrouted or stale, assess mail loss/impersonation concerns  
+otherwise / stop: If valid, investigate mail controls independently
+
+02-05 · if: TXT records exist  
+then inspect: Classify SPF, DMARC, site verification, other published tokens, and unintended secrets  
+if confirmed / positive: If unexpected sensitive values, validate exposure without using credentials  
+otherwise / stop: If merely a verification token, avoid assuming it grants access
+
+02-06 · if: An SPF record exists  
+then inspect: Check syntax, lookup budget, include chains, legacy mechanisms, overly broad authorized senders  
+if confirmed / positive: If overly permissive, prioritize mail spoofing risk review  
+otherwise / stop: If valid, still separately test DKIM and DMARC
+
+02-07 · if: A DMARC record exists or is missing  
+then inspect: Review policy, alignment, aggregate reporting destinations, subdomain policy  
+if confirmed / positive: If weak/missing, evaluate spoofing exposure with owner  
+otherwise / stop: If strict, check whether legitimate mail remains aligned
+
+02-08 · if: A DKIM selector is published  
+then inspect: Review selector configuration, current key strength, rotation and alignment  
+if confirmed / positive: If weak/stale, recommend rotation after confirming mail flow  
+otherwise / stop: If good, continue other mail controls
+
+02-09 · if: A CAA record exists or is missing  
+then inspect: Compare permitted certificate authorities and issuance workflow  
+if confirmed / positive: If issuance policy is unintended, adjust after verifying operational needs  
+otherwise / stop: Absence is not by itself proof of compromise
+
+02-10 · if: DS/DNSKEY/RRSIG records appear  
+then inspect: Evaluate DNSSEC trust chain, signing, rollover, expiry, and validator behavior  
+if confirmed / positive: If broken validation, investigate resolution failure or spoofing protection gap  
+otherwise / stop: If absent, document DNSSEC posture without declaring an exploit
+
+02-11 · if: PTR or reverse DNS is present  
+then inspect: Compare host naming to forward resolution and email sending policy  
+if confirmed / positive: If mismatch, review operational impact  
+otherwise / stop: PTR alone does not prove server ownership
+
+02-12 · if: SRV, SVCB, HTTPS, or other service discovery records appear  
+then inspect: Parse service target, port, priority and protocol parameters  
+if confirmed / positive: If a new reachable in-scope service is named, enqueue service scan  
+otherwise / stop: If target is external, stop at third-party boundary
+
+02-13 · if: DNS wildcard responses appear  
+then inspect: Distinguish wildcard results from real named assets using controls  
+if confirmed / positive: If wildcard, avoid counting invented subdomains  
+otherwise / stop: If distinct service, add real host branch
+
+02-14 · if: DNS zone transfer is configured  
+then inspect: Review authoritative server transfer ACLs through owner-approved validation  
+if confirmed / positive: If unauthorized transfer is confirmed, report namespace exposure  
+otherwise / stop: Otherwise leave as configuration question, no speculative claim
+
+02-15 · if: Historical DNS or certificate records reveal old hosts  
+then inspect: Compare archival timestamps to present resolution and ownership  
+if confirmed / positive: If still live and authorized, inspect legacy host  
+otherwise / stop: If stale or outside scope, label historical; avoid calling it active
+
+02-16 · if: DNS rebinding or split-horizon behavior is suspected  
+then inspect: Compare authorized vantage points and DNS answers  
+if confirmed / positive: If internal/private addresses are served externally, assess SSRF/browser trust issues carefully  
+otherwise / stop: If inaccessible internally, request administrator-supplied view
+
+03. network, hosting, and exposed services
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+03-01 · if: A resolved IP address is in scope  
+then inspect: Determine provider, ASN, CDNs, shared hosting, WAF and actual asset ownership  
+if confirmed / positive: If dedicated or explicitly in scope, inventory listening ports  
+otherwise / stop: If shared third-party edge, do not scan unrelated tenant services
+
+03-02 · if: A host responds over TCP/UDP  
+then inspect: Identify service and protocol without stress testing  
+if confirmed / positive: If service is unexpected, inspect exposure and access policy  
+otherwise / stop: If expected, inspect hardening and patch state
+
+03-03 · if: Port 80 or 443 serves HTTP(S)  
+then inspect: Proceed to web routing, TLS, headers, pages, and application tests  
+if confirmed / positive: If multiple virtual hosts, enumerate known in-scope hostnames  
+otherwise / stop: If only a CDN/WAF, note edge-origin visibility limits
+
+03-04 · if: SSH, RDP, VNC, or VPN is exposed  
+then inspect: Review necessity, authorized users, MFA, network restrictions, version and patch posture  
+if confirmed / positive: If unnecessarily public, recommend restricting access  
+otherwise / stop: If no authorized config access, only externally observable properties are known
+
+03-05 · if: A database or cache port is reachable  
+then inspect: Review intended network isolation, authentication, encryption and bind settings  
+if confirmed / positive: If internet exposure is unintended, escalate without reading data  
+otherwise / stop: If protected, assess configuration with administrator access
+
+03-06 · if: A mail service port is reachable  
+then inspect: Review SMTP/IMAP/POP exposure, authentication, transport TLS and relay policy  
+if confirmed / positive: If unexpected relay or cleartext access, investigate via permitted non-abusive validation  
+otherwise / stop: If controlled, map to email controls
+
+03-07 · if: An admin console or management interface is reachable  
+then inspect: Confirm in-scope ownership and intended audience  
+if confirmed / positive: If public, review MFA, IP restrictions, role access and version  
+otherwise / stop: If inaccessible, don't try to bypass it
+
+03-08 · if: A service version or banner is disclosed  
+then inspect: Cross-check software/component identity, patch level and vendor advisories  
+if confirmed / positive: If known CVE matches, verify applicability and reachability safely  
+otherwise / stop: Version alone is insufficient to verify vulnerability
+
+03-09 · if: TLS service exists outside the web server  
+then inspect: Check applicable TLS versions, certificates, trusted chain and hostname identity  
+if confirmed / positive: If invalid or legacy setting, classify risk in protocol context  
+otherwise / stop: If good, proceed with service-specific access tests
+
+03-10 · if: A service is filtered, times out, or rate-limits probes  
+then inspect: Record observation and distinguish blocked from closed or absent  
+if confirmed / positive: If rate-limited, slow or stop according to rules  
+otherwise / stop: Do not infer vulnerability absence from lack of response
+
+03-11 · if: An exposed IoT, OT, or appliance endpoint appears  
+then inspect: Determine owner, life-safety/operational sensitivity and excluded scope  
+if confirmed / positive: If specifically authorized, use vendor-safe review procedures  
+otherwise / stop: Otherwise stop active tests and notify owner
+
+04. TLS, transport, and HTTP edge
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+04-01 · if: An HTTPS endpoint exists  
+then inspect: Validate certificate hostname, chain, expiration, renewal automation, issuer and policy  
+if confirmed / positive: If invalid, identify user impact and remediation  
+otherwise / stop: If valid, test protocol configuration next
+
+04-02 · if: A TLS handshake negotiates legacy protocols or ciphers  
+then inspect: Compare negotiated suites to policy and current guidance  
+if confirmed / positive: If weak, record server and client compatibility implications  
+otherwise / stop: If modern, continue forward secrecy and key management review
+
+04-03 · if: HTTP is offered alongside HTTPS  
+then inspect: Determine redirect behavior, mixed-content, HSTS applicability and upgrade path  
+if confirmed / positive: If sensitive endpoints remain on HTTP, prioritize confidentiality/integrity concern  
+otherwise / stop: If redirected, still verify first-visit and subdomain behavior
+
+04-04 · if: HTTP response sets HSTS  
+then inspect: Review max-age, subdomain coverage and preload suitability  
+if confirmed / positive: If missing/weak on sensitive site, consider stronger policy after coverage audit  
+otherwise / stop: If present, verify subdomain compatibility before changing
+
+04-05 · if: A reverse proxy/CDN/WAF is present  
+then inspect: Review forwarding headers, host handling, cache policy, origin restrictions and bypass exposure  
+if confirmed / positive: If origin is publicly reachable, review origin access constraints  
+otherwise / stop: If hidden, do not assume backend is unreachable by all routes
+
+04-06 · if: HTTP compression or caching is enabled  
+then inspect: Check secrets in shared caches, cache keys, cookies and content-type separation  
+if confirmed / positive: If private data caches publicly, verify with harmless test accounts  
+otherwise / stop: If safe, continue cache-control integrity checks
+
+04-07 · if: A site offers HTTP/2 or HTTP/3  
+then inspect: Review protocol settings, proxy/backend consistency, resource constraints and patch levels  
+if confirmed / positive: If parsing inconsistencies indicated, scope-safe specialist tests follow  
+otherwise / stop: If none, avoid assuming complex request smuggling
+
+04-08 · if: CORS headers are present  
+then inspect: Compare allowed origins, credentials, methods and header restrictions with data sensitivity  
+if confirmed / positive: If origin is untrusted and sensitive response accessible, verify exposure with test data  
+otherwise / stop: If restrictive, document expected cross-origin behavior
+
+04-09 · if: Redirect parameters exist  
+then inspect: Review destination allowlist and input normalization  
+if confirmed / positive: If attacker-controlled external destinations are permitted, examine phishing or token leakage implications  
+otherwise / stop: If destinations are fixed, close open-redirect branch
+
+04-10 · if: Security headers are present or missing  
+then inspect: Inspect CSP, framing policy, MIME sniffing, referrer rules and permissions policies  
+if confirmed / positive: If missing, map controls to actual attack possibilities  
+otherwise / stop: Absence of a single header is not automatically an exploitable bug
+
+05. website structure, pages, and content discovery
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+05-01 · if: A live website is found  
+then inspect: Collect in-scope starting URLs and follow links within approved crawl rules  
+if confirmed / positive: If page reveals new in-scope paths or hosts, enqueue them  
+otherwise / stop: If link is third party or excluded, record edge only
+
+05-02 · if: A robots.txt file exists  
+then inspect: Interpret crawler directives as signals, not authorization or protection  
+if confirmed / positive: If allowed by authorization, review referenced paths carefully  
+otherwise / stop: Do not use disallow as permission to access sensitive systems
+
+05-03 · if: An XML sitemap or index exists  
+then inspect: Extract canonical URLs, languages, timestamps and nested sitemaps  
+if confirmed / positive: If new in-scope routes appear, enqueue route analysis  
+otherwise / stop: If stale, label historical hint
+
+05-04 · if: HTML links, forms, or script URLs exist  
+then inspect: Parse href, action, method, query, embedded resources and dynamic route references  
+if confirmed / positive: If new same-origin endpoint, add to route tree  
+otherwise / stop: If external, record third-party dependency
+
+05-05 · if: A page uses a SPA or client-side router  
+then inspect: Observe authorized browser navigation and network requests  
+if confirmed / positive: If hidden app routes/API calls appear, add to page and API maps  
+otherwise / stop: If authentication blocks view, mark gated surface
+
+05-06 · if: A form is found  
+then inspect: Identify input fields, method, backend endpoint, data type, authentication and CSRF expectations  
+if confirmed / positive: If mutation occurs, branch to permissions, input handling and business logic  
+otherwise / stop: If read-only, branch to query validation and privacy
+
+05-07 · if: A route contains parameters or IDs  
+then inspect: Classify query/path/body/header/cookie inputs and resource ownership semantics  
+if confirmed / positive: If user-controlled data enters a sink, branch to validation and authorization  
+otherwise / stop: If static, perform config and content checks only
+
+05-08 · if: The URL is an upload/download/export/import path  
+then inspect: Branch to file handling, access controls, size/content constraints and privacy  
+if confirmed / positive: If file operation is destructive, require safe test fixtures  
+otherwise / stop: If links are dead, report availability issue separately
+
+05-09 · if: JavaScript bundles or source maps are exposed  
+then inspect: Inventory endpoints, feature flags and accidental secrets using non-sensitive inspection  
+if confirmed / positive: If secret indicator appears, request safe rotation review  
+otherwise / stop: If code is public by design, don't equate exposure with exploit
+
+05-10 · if: A legacy route or archived endpoint exists  
+then inspect: Check whether it remains deployed, authenticated and in scope  
+if confirmed / positive: If active, review unsupported code and data retention  
+otherwise / stop: If only historical, annotate timestamp and stop active branch
+
+05-11 · if: Search, pagination, filtering, and sorting are present  
+then inspect: Identify backend parameters, rate limits and validation paths  
+if confirmed / positive: If expensive queries or unsafe inputs are plausible, test with harmless limits  
+otherwise / stop: Otherwise verify expected access controls
+
+05-12 · if: 404, 500, or custom error pages exist  
+then inspect: Inspect whether stack traces, internal paths or secrets leak in errors  
+if confirmed / positive: If yes, log evidence with redaction and review exception handling  
+otherwise / stop: If generic, do not infer internal error hygiene
+
+06. identity, enrollment, authentication, and recovery
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+06-01 · if: A login endpoint or sign-in button exists  
+then inspect: Map password, passwordless, SSO, MFA, device trust and user enumeration behavior  
+if confirmed / positive: If credentials authenticate, follow session and authorization branches  
+otherwise / stop: If access unavailable, do not guess or brute force
+
+06-02 · if: An account registration path exists  
+then inspect: Review email verification, invitation constraints, bot abuse controls and activation races  
+if confirmed / positive: If unverified identity grants privilege, review account takeover exposure  
+otherwise / stop: If verified, inspect edge cases and duplicate identities
+
+06-03 · if: Password authentication exists  
+then inspect: Review storage hashing, minimum protections, lockout design, credential-stuffing resistance and breached-password policy  
+if confirmed / positive: If implementation/config access exists, verify hashing and secret handling  
+otherwise / stop: If not, external behavior alone cannot prove password storage quality
+
+06-04 · if: MFA is supported  
+then inspect: Review enrollment, enforcement by role, recovery, bypass through alternate paths, phishing-resistant options  
+if confirmed / positive: If alternate path lacks MFA, investigate policy gap  
+otherwise / stop: If consistently required, test session elevation behavior
+
+06-05 · if: Password reset or account recovery exists  
+then inspect: Examine token generation, expiry, reuse, rate limiting, identity proofing, invalidation and notification  
+if confirmed / positive: If token reuse or account enumeration plausible, verify with test accounts  
+otherwise / stop: If safe, test unusual recovery sequences
+
+06-06 · if: An SSO, OAuth 2.0, or OIDC integration exists  
+then inspect: Review registered redirect URIs, state, nonce, PKCE, scopes, token audience/issuer and trust mapping  
+if confirmed / positive: If provider or callback misconfiguration exists, assess actual impact  
+otherwise / stop: If correct, still inspect local role assignment
+
+06-07 · if: SAML federation exists  
+then inspect: Review signature verification, audience, recipient, clock skew, replay protection and claim mapping  
+if confirmed / positive: If identity claims are overly trusted, review privilege escalation potential  
+otherwise / stop: If correct, test logout and provisioning
+
+06-08 · if: Passkeys/WebAuthn exist  
+then inspect: Review challenge binding, relying-party origin/ID, user verification, authenticator registration and recovery  
+if confirmed / positive: If fallback weaker than passkey path, evaluate downgrade risk  
+otherwise / stop: If robust, inspect account lifecycle and device loss
+
+06-09 · if: A service account or API key is used for authentication  
+then inspect: Review scope, rotation, expiration, storage and revocation  
+if confirmed / positive: If long-lived/broad, prioritize least privilege  
+otherwise / stop: If short-lived, check renewal and audit trails
+
+06-10 · if: A username or email existence difference is visible  
+then inspect: Compare safe response behavior for valid/invalid test identities  
+if confirmed / positive: If enumeration possible, assess practical abuse impact  
+otherwise / stop: If indistinguishable, close enumeration branch, not all auth risks
+
+06-11 · if: A privileged action requires recent authentication  
+then inspect: Check that reauthentication and MFA changes survive alternate routes and APIs  
+if confirmed / positive: If bypassed, prioritize critical workflow  
+otherwise / stop: If enforced, ensure tokens rotate correctly
+
+07. session management, cookies, and tokens
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+07-01 · if: A session cookie is set  
+then inspect: Inspect Secure, HttpOnly, SameSite, expiry, Domain, Path and prefix semantics  
+if confirmed / positive: If unsafe attributes affect the actual threat model, confirm risk  
+otherwise / stop: If appropriate, inspect rotation/revocation next
+
+07-02 · if: A session is created at login  
+then inspect: Compare pre-login and post-login identifiers; inspect session fixation prevention  
+if confirmed / positive: If same attacker-controlled identifier persists, evaluate fixation safely  
+otherwise / stop: If rotated, proceed to logout lifecycle
+
+07-03 · if: A logout endpoint exists  
+then inspect: Verify server-side invalidation of current sessions, refresh tokens and remembered devices  
+if confirmed / positive: If token remains accepted after logout, determine severity  
+otherwise / stop: If revoked, test concurrent devices
+
+07-04 · if: Refresh tokens are issued  
+then inspect: Inspect storage, reuse detection, rotation, expiry, audience and revocation  
+if confirmed / positive: If reused tokens remain active, assess account persistence risk  
+otherwise / stop: If strong, test lost-device recovery
+
+07-05 · if: JWTs or signed tokens are used  
+then inspect: Review algorithm allowlist, signature validation, issuer, audience, expiration and key rotation  
+if confirmed / positive: If validation trusts unverified claims, assess authorization effect  
+otherwise / stop: If valid, authorization must still check resource ownership
+
+07-06 · if: A password/MFA/role change occurs  
+then inspect: Check whether existing sessions and grants are invalidated appropriately  
+if confirmed / positive: If stale privileges persist, test with two controlled accounts  
+otherwise / stop: If immediately updated, check long-lived workers and caches
+
+07-07 · if: A state-changing browser request exists  
+then inspect: Evaluate CSRF protections, SameSite and origin checks in context  
+if confirmed / positive: If authenticated cross-site mutation is possible, validate with harmless action  
+otherwise / stop: If not, continue XSS and token storage review
+
+07-08 · if: Session tokens appear in URLs, logs, referrers or local storage  
+then inspect: Trace leakage to browser history, analytics, external hosts and accessible scripts  
+if confirmed / positive: If exposed, prioritize revocation and data protection  
+otherwise / stop: If not, still test token lifetime and scope
+
+07-09 · if: Concurrent sessions or device management exist  
+then inspect: Review revocation UI, session inventory, unusual-login notification and race behavior  
+if confirmed / positive: If user cannot revoke known devices, examine response/recovery  
+otherwise / stop: If supported, verify actual revocation
+
+08. authorization, object ownership, and tenant isolation
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+08-01 · if: An endpoint returns a resource for an identifier  
+then inspect: Determine ownership, role, tenant and policy expected to govern it  
+if confirmed / positive: If an authorized test account accesses another test account's object, confirm BOLA/IDOR  
+otherwise / stop: If denied, test other verbs and object types
+
+08-02 · if: Different user roles exist  
+then inspect: Build a role-action matrix for read/create/update/delete/export/approve  
+if confirmed / positive: If low role can perform high-role action, confirm function-level authorization failure  
+otherwise / stop: If denied, test alternate client/API route
+
+08-03 · if: Multi-tenant data exists  
+then inspect: Track tenant ID from identity context to every backend data lookup  
+if confirmed / positive: If tenant A can access tenant B fixture, prioritize isolation breach  
+otherwise / stop: If isolated, test indirect references and background jobs
+
+08-04 · if: An API accepts an object with editable fields  
+then inspect: Compare client-supplied fields against server-owned fields  
+if confirmed / positive: If role, price, owner, or tenant can be mass-assigned, evaluate impact  
+otherwise / stop: If allowlisted, check nested objects and aliases
+
+08-05 · if: A privileged UI control is hidden  
+then inspect: Confirm server independently enforces entitlement  
+if confirmed / positive: If API accepts direct invocation by unauthorized role, report authorization issue  
+otherwise / stop: If server rejects, hiding the UI is only usability
+
+08-06 · if: A relationship or nested object is accessed  
+then inspect: Check both parent and child ownership, including indirect joins  
+if confirmed / positive: If either is unchecked, validate with safe fixtures  
+otherwise / stop: If both checked, inspect aggregation/export paths
+
+08-07 · if: A shared link, invite, or public resource exists  
+then inspect: Inspect token entropy, scope, expiry, revocation and onward sharing behavior  
+if confirmed / positive: If token leaks or over-grants, assess real access window  
+otherwise / stop: If correctly scoped, document remaining intended public access
+
+08-08 · if: An asynchronous worker performs actions  
+then inspect: Check the actor's authority is captured and revalidated at execution  
+if confirmed / positive: If worker uses excessive platform privilege, inspect cross-user effects  
+otherwise / stop: If enforced, audit retries and stale roles
+
+08-09 · if: A file or report can be exported  
+then inspect: Verify that filters and permissions apply server-side to all exported rows  
+if confirmed / positive: If hidden rows are included, prioritize data leakage  
+otherwise / stop: If correct, check cache and download links
+
+08-10 · if: An administrative or support impersonation feature exists  
+then inspect: Review consent, justification, audit, timeboxing, reauthentication and restrictions  
+if confirmed / positive: If impersonation bypasses boundaries, escalate  
+otherwise / stop: If controlled, verify evidence logs
+
+09. inputs, injection, parsing, and output encoding
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+09-01 · if: A query/body/header/cookie/path parameter accepts input  
+then inspect: Identify type, allowed range, normalization, parser and downstream usage  
+if confirmed / positive: If input is embedded in an interpreter or output sink, branch to sink-specific review  
+otherwise / stop: If structurally constrained, verify schema enforcement at server
+
+09-02 · if: A value reaches a SQL query  
+then inspect: Review parameterized statements, query builder, stored procedures and dynamic clauses  
+if confirmed / positive: If string interpolation is used, assess SQL injection with safe authorized checks  
+otherwise / stop: If parameterized, still inspect dynamic identifiers and authorization
+
+09-03 · if: A value reaches shell/process invocation  
+then inspect: Review command argument construction and allowlists  
+if confirmed / positive: If shell interpretation is possible, assess command injection with safe test fixtures  
+otherwise / stop: If direct argument arrays and allowlists, close this sink path
+
+09-04 · if: A value reaches a template renderer  
+then inspect: Identify engine and context-specific escaping/sandboxing  
+if confirmed / positive: If user input is interpreted as template code, assess server-side template injection  
+otherwise / stop: If text-only rendering, inspect output encoding
+
+09-05 · if: A value reaches HTML, JS, CSS, or DOM sinks  
+then inspect: Review contextual encoding, HTML sanitization and CSP  
+if confirmed / positive: If executable script enters browser context, investigate XSS in safe fixtures  
+otherwise / stop: If encoded, test each context separately
+
+09-06 · if: A value becomes a URL fetched by the backend  
+then inspect: Check scheme, host, IP classification, redirects, DNS changes, egress policy and purpose  
+if confirmed / positive: If internal destinations are reachable, evaluate SSRF safely without targeting private data  
+otherwise / stop: If blocked, test normalization and redirect handling
+
+09-07 · if: A parameter selects a filesystem path  
+then inspect: Review canonicalization, fixed root, symlinks, path separators and access permissions  
+if confirmed / positive: If escaping approved directory is possible, assess traversal using harmless fixture  
+otherwise / stop: If contained, check upload and archive extraction
+
+09-08 · if: An XML parser receives external input  
+then inspect: Review external entity resolution, DTD, network/file access and parser features  
+if confirmed / positive: If external entities are enabled, review XXE with isolated test data  
+otherwise / stop: If disabled, document parser posture
+
+09-09 · if: A NoSQL/LDAP/search query uses user-supplied operators  
+then inspect: Check typed query building, operator allowlists and permissions  
+if confirmed / positive: If input changes query structure, test injection safely  
+otherwise / stop: If constrained, verify nested variants
+
+09-10 · if: An HTTP proxy and backend parse requests differently  
+then inspect: Review protocol versions, hop-by-hop headers, message framing and proxy patches  
+if confirmed / positive: If desynchronization indicators exist, use approved non-disruptive specialist tests  
+otherwise / stop: If no evidence, avoid high-impact production probes
+
+09-11 · if: User input affects logs or telemetry  
+then inspect: Check log injection, redaction, structured encoding, oversized entries and retention  
+if confirmed / positive: If forged records or secrets possible, review SIEM trust  
+otherwise / stop: If safe, continue monitoring effectiveness
+
+09-12 · if: An upload parser handles structured data  
+then inspect: Check MIME sniffing, content parsing, unsafe deserialization and archive extraction  
+if confirmed / positive: If unexpected code/object execution possible, isolate test in sandbox  
+otherwise / stop: If safe, verify resource limits
+
+09-13 · if: A response includes serialized user data  
+then inspect: Inspect output encoding per MIME type and client context  
+if confirmed / positive: If data appears unsafely embedded in script/HTML, validate XSS  
+otherwise / stop: If safe, inspect unauthorized disclosure
+
+09-14 · if: A sorting/filtering/query language exists  
+then inspect: Review expression parsing, cost bounds, parameterization and allowed operations  
+if confirmed / positive: If unbounded or executable expressions exist, assess resource or injection risk  
+otherwise / stop: If constrained, measure denial-of-service resilience safely
+
+10. API, GraphQL, gRPC, WebSockets, and webhooks
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+10-01 · if: An /api route, API specification or network call exists  
+then inspect: Inventory method, path, parameters, authentication, version, data class and owner  
+if confirmed / positive: If endpoint manipulates resources, run authorization and input branches  
+otherwise / stop: If read-only, still assess data visibility and rate limits
+
+10-02 · if: A REST collection endpoint exists  
+then inspect: Review filters, pagination boundaries, sorting, export and rate limits  
+if confirmed / positive: If it returns too much or another tenant's data, confirm with fixtures  
+otherwise / stop: If bounded, evaluate cache and availability
+
+10-03 · if: GraphQL is used  
+then inspect: Inspect introspection policy, field-level auth, mutation auth, query complexity, batching and error data  
+if confirmed / positive: If nested fields bypass controls, verify with test accounts  
+otherwise / stop: If protected, check recursion/complexity caps
+
+10-04 · if: A gRPC service is present  
+then inspect: Review method authorization, transport security, reflection exposure and message validation  
+if confirmed / positive: If methods are reachable without intended privilege, confirm scope-safe  
+otherwise / stop: If restricted, inspect server-to-server identity
+
+10-05 · if: A WebSocket connection is established  
+then inspect: Review upgrade authentication, origin rules, per-message authorization and disconnect/revocation  
+if confirmed / positive: If session expires but messages remain authorized, assess stale access  
+otherwise / stop: If revoked, inspect subscription scoping
+
+10-06 · if: A webhook endpoint receives callbacks  
+then inspect: Verify signatures, replay protection, timestamps, idempotency and callback authorization  
+if confirmed / positive: If unsigned/replayed requests alter state, confirm in sandbox  
+otherwise / stop: If secure, review asynchronous side effects
+
+10-07 · if: An API has versioned routes  
+then inspect: Compare security controls across current, deprecated and beta versions  
+if confirmed / positive: If older version bypasses fix, prioritize deprecation  
+otherwise / stop: If consistent, record covered versions
+
+10-08 · if: An API accepts user-supplied properties  
+then inspect: Review field allowlists, nested data, ownership and object-level permissions  
+if confirmed / positive: If mass assignment is possible, branch to authorization  
+otherwise / stop: If not, check business invariants
+
+10-09 · if: Bulk operations or batched requests exist  
+then inspect: Review per-item authorization, maximum count, transaction semantics and rate accounting  
+if confirmed / positive: If batch omits checks, test with fixtures  
+otherwise / stop: If enforced, measure resource bound
+
+10-10 · if: An API returns errors or verbose schemas  
+then inspect: Assess whether stack traces, server version, internal IDs or private fields leak  
+if confirmed / positive: If so, reduce disclosure without hiding useful errors  
+otherwise / stop: If not, test other failure modes
+
+10-11 · if: An API calls third-party APIs  
+then inspect: Check outbound credentials, data transfer rules, callback verification and vendor trust  
+if confirmed / positive: If third-party is out of scope, stop active exploration there  
+otherwise / stop: If permission provided, separately assess integration
+
+11. application logic and transaction state
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+11-01 · if: An application has a multi-step workflow  
+then inspect: Model state transitions, allowed actors, invariants and failure/retry states  
+if confirmed / positive: If a step can be skipped or repeated, assess policy and data effects  
+otherwise / stop: If validated, test concurrency and rollback
+
+11-02 · if: Money, credits, discounts or prices exist  
+then inspect: Identify server-authoritative values, rounding, idempotency, exchange/tax logic and approval limits  
+if confirmed / positive: If client can set authoritative amount, confirm only in sandbox  
+otherwise / stop: If protected, test duplicated request accounting
+
+11-03 · if: A purchase/payment/withdrawal endpoint exists  
+then inspect: Review duplicate submission, retries, gateway callbacks, reconciliation and partial failure  
+if confirmed / positive: If repeated action has unintended effect, prioritize financial integrity  
+otherwise / stop: If idempotent, verify with controlled concurrent tests
+
+11-04 · if: Inventory, quotas or resource allocations exist  
+then inspect: Review race conditions, atomic updates and overuse bounds  
+if confirmed / positive: If concurrent requests violate invariant, confirm with non-production fixtures  
+otherwise / stop: If atomic, check distributed components
+
+11-05 · if: An invite, referral, reward or coupon process exists  
+then inspect: Check entitlement, stacking, replay, self-referral and account lifecycle  
+if confirmed / positive: If policy can be bypassed, quantify constrained impact  
+otherwise / stop: If enforced, document cases
+
+11-06 · if: Approval or moderation flow exists  
+then inspect: Review maker-checker separation, state races, audit and policy override  
+if confirmed / positive: If low privilege can self-approve, escalate  
+otherwise / stop: If controlled, test API vs UI parity
+
+11-07 · if: Time-limited offers, tokens or resources exist  
+then inspect: Validate expiry at trusted server time, replay and timezone semantics  
+if confirmed / positive: If expired object is accepted, assess access consequence  
+otherwise / stop: If enforced, test caches/queued jobs
+
+11-08 · if: An order/export/delete job runs asynchronously  
+then inspect: Verify unique job identity, input permissions, status reporting, and final outcome reconciliation  
+if confirmed / positive: If client success precedes durable operation, report misleading state  
+otherwise / stop: If transactional, test recovery
+
+11-09 · if: A feature has business-specific rules  
+then inspect: Translate each policy into invariant and negative test  
+if confirmed / positive: If any rule can be violated with authorized fixtures, document exact mechanism  
+otherwise / stop: If tests pass, record scope and versions, not absolute safety
+
+12. browser/client-side security
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+12-01 · if: A page loads JavaScript from first or third party  
+then inspect: Identify dependencies, integrity controls, permissions, source maps and sensitive DOM access  
+if confirmed / positive: If remote script is trusted broadly, review supply-chain and CSP exposure  
+otherwise / stop: If restricted, inspect update workflow
+
+12-02 · if: A Content-Security-Policy header exists  
+then inspect: Evaluate script, object, frame, base, connect and reporting directives against app behavior  
+if confirmed / positive: If dangerously permissive, map to actual XSS effects  
+otherwise / stop: If strict, inspect report collection and violations
+
+12-03 · if: A page uses localStorage, IndexedDB or sessionStorage  
+then inspect: Classify stored tokens, PII and secrets; review XSS consequences  
+if confirmed / positive: If sensitive data accessible to scripts, evaluate alternatives  
+otherwise / stop: If non-sensitive, confirm retention and logout cleanup
+
+12-04 · if: A browser message event exists  
+then inspect: Verify event.origin, source, schema, and authorized target origin  
+if confirmed / positive: If wildcard/unvalidated cross-origin messages change state, validate with fixtures  
+otherwise / stop: If allowlisted, review embedded frame trust
+
+12-05 · if: A service worker or PWA exists  
+then inspect: Check cache scope, update, logout cleanup, response interception and stale versions  
+if confirmed / positive: If private data persists across users, prioritize privacy  
+otherwise / stop: If isolated, verify offline error behavior
+
+12-06 · if: An iframe or embedding flow exists  
+then inspect: Review sandbox, frame-ancestors and clickjacking exposure  
+if confirmed / positive: If sensitive actions can be embedded by untrusted origins, assess UI redress  
+otherwise / stop: If blocked, test legitimate integrations
+
+12-07 · if: DOM is updated using untrusted content  
+then inspect: Check dangerous HTML insertion, URL protocols, inline event execution  
+if confirmed / positive: If browser executes attacker-supplied script, assess XSS  
+otherwise / stop: If safely rendered, keep inspecting server auth
+
+12-08 · if: A page loads WebAssembly  
+then inspect: Review memory safety assumptions, host imports, permissions, untrusted inputs, resource exhaustion  
+if confirmed / positive: If external data reaches sensitive native/runtime code, obtain specialist review  
+otherwise / stop: If sandboxed and bounded, close branch with evidence
+
+12-09 · if: A browser extension or companion client is involved  
+then inspect: Review extension permissions, message passing, storage and update authenticity  
+if confirmed / positive: If overly privileged, map information access blast radius  
+otherwise / stop: If restricted, inspect cross-origin sharing
+
+13. files, storage, databases, and privacy
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+13-01 · if: A user can upload a file  
+then inspect: Review authorization, allowed types, actual content signatures, limits, filename/path and scanning policy  
+if confirmed / positive: If executable or dangerous content can become active, sandbox evaluation  
+otherwise / stop: If contained, test metadata and retrieval controls
+
+13-02 · if: A user can download files or reports  
+then inspect: Check ownership, predictable identifiers, signed URL scope, expiry and caching  
+if confirmed / positive: If other user files accessible, verify with controlled fixtures  
+otherwise / stop: If correctly protected, inspect link forwarding and revocation
+
+13-03 · if: An archive, image, PDF or media parser is used  
+then inspect: Review patching, recursion, decompression limits and isolation  
+if confirmed / positive: If untrusted content triggers parser error, test only in sandbox  
+otherwise / stop: If resilient, check resource limits and timeouts
+
+13-04 · if: Object storage exists  
+then inspect: Review public access, IAM policies, origin bindings, presigned URLs, bucket/object policies and access logs  
+if confirmed / positive: If public exposure unintended, escalate with minimal proof  
+otherwise / stop: If private, inspect delegated access and token lifetime
+
+13-05 · if: A database holds sensitive records  
+then inspect: Review encryption, schema authorization, tenant separation, backups, audit and retention  
+if confirmed / positive: If direct database access is not authorized, do not inspect contents  
+otherwise / stop: If approved, use fixtures and masked data
+
+13-06 · if: A database backup, snapshot or export exists  
+then inspect: Check who can create, access, download, share and delete it  
+if confirmed / positive: If backups are public or long-lived, prioritize data exposure  
+otherwise / stop: If protected, test restoration controls and retention
+
+13-07 · if: Logs contain user input or credentials  
+then inspect: Review structured logging, redaction, access roles, retention and cross-tenant access  
+if confirmed / positive: If secrets logged, redact evidence and rotate compromised tokens  
+otherwise / stop: If clean, test incident traceability
+
+13-08 · if: A cache/CDN stores personalized content  
+then inspect: Inspect key separation, Cache-Control, Authorization/Cookie variation and purge  
+if confirmed / positive: If cross-user cache leak confirmed, escalate  
+otherwise / stop: If private, verify stale logout and permission changes
+
+13-09 · if: A dataset has classification/legal retention requirements  
+then inspect: Track collection purpose, consent, access, geography, deletion and subject rights  
+if confirmed / positive: If inappropriate collection or retention, document privacy control issue  
+otherwise / stop: If compliant for scope, assess breach response and audit
+
+13-10 · if: A search index or analytics pipeline copies data  
+then inspect: Map replication, secondary stores and access control equivalence  
+if confirmed / positive: If data is accessible through weaker index, assess unintended exposure  
+otherwise / stop: If equivalent, inspect retention and deletion propagation
+
+14. cloud infrastructure, containers, and IAM
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+14-01 · if: Hosting is identified as AWS, Azure, GCP, or another cloud  
+then inspect: Map account/subscription/project ownership and allowed cloud-control-plane evidence  
+if confirmed / positive: If owner grants access, review configuration and policies  
+otherwise / stop: Without credentials, external domain view cannot establish internal cloud IAM security
+
+14-02 · if: A public cloud object store is found  
+then inspect: Review bucket ACL/policy, public access restrictions, presigned/SAS URLs and cross-account delegation  
+if confirmed / positive: If unintended access, collect non-sensitive proof only  
+otherwise / stop: If intentionally public, assess permitted content and change control
+
+14-03 · if: A compute instance, VM, or serverless function is used  
+then inspect: Check network identity, outbound restrictions, secrets, patching and execution role  
+if confirmed / positive: If broadly privileged, model blast radius  
+otherwise / stop: If limited, review runtime and data access
+
+14-04 · if: An IAM role, service principal, or workload identity exists  
+then inspect: Analyze trust policy, permissions, session duration, keys and resource conditions  
+if confirmed / positive: If wildcards or cross-account trust excessive, tighten least privilege  
+otherwise / stop: If narrowly scoped, test revocation and policy drift
+
+14-05 · if: A Kubernetes cluster is present  
+then inspect: Review API exposure, RBAC, namespaces, admission controls, pod security, secret handling and network policy  
+if confirmed / positive: If cluster-admin access too broad, prioritize governance  
+otherwise / stop: If restricted, assess workload isolation
+
+14-06 · if: A container image is deployed  
+then inspect: Check base image provenance, patch age, root user, file permissions and injected secrets  
+if confirmed / positive: If vulnerable component is exploitable in context, open supply-chain finding  
+otherwise / stop: If clean, check runtime policies
+
+14-07 · if: Cloud networking is configured  
+then inspect: Review security groups, firewalls, load balancers, private endpoints and origin protections  
+if confirmed / positive: If sensitive backend public unexpectedly, review network exposure  
+otherwise / stop: If private, inspect lateral movement access controls with permission
+
+14-08 · if: An infrastructure-as-code repository exists  
+then inspect: Compare declared policies and actual deployed state, secret hygiene and approvals  
+if confirmed / positive: If drift permits unexpected exposure, investigate change process  
+otherwise / stop: If matched, review default configurations
+
+14-09 · if: CI/CD uses cloud deployment credentials  
+then inspect: Check short-lived tokens, OIDC trust, secrets handling, environment separation and manual approvals  
+if confirmed / positive: If build can deploy with broad production powers, minimize privilege  
+otherwise / stop: If restricted, inspect artifact signing and rollback
+
+14-10 · if: A secret manager or KMS is used  
+then inspect: Review secret access policy, rotation, key use, auditing, encryption contexts and recovery  
+if confirmed / positive: If workload shares broad secret access, evaluate blast radius  
+otherwise / stop: If restricted, test break-glass procedures
+
+14-11 · if: A CDN/WAF fronts cloud workloads  
+then inspect: Confirm origin authentication, private connectivity and rule coverage across hosts  
+if confirmed / positive: If bypass is observable, review config with owner  
+otherwise / stop: If covered, ensure APIs and admin paths use equal protections
+
+15. software, dependencies, CI/CD, and supply chain
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+15-01 · if: A framework/server/library is identified  
+then inspect: Inventory exact version and deployment context  
+if confirmed / positive: If advisory applies, verify reachability and mitigation rather than trusting CVE match alone  
+otherwise / stop: If unsupported/EOL, evaluate maintenance risk separately
+
+15-02 · if: A public or owner-provided repository exists  
+then inspect: Review secrets, dependencies, code ownership, protected branches and test coverage  
+if confirmed / positive: If exposed credential found, rotate without using it  
+otherwise / stop: If clean, inspect CI and build output
+
+15-03 · if: A manifest/lockfile exists  
+then inspect: Build dependency tree including transitive packages and sources  
+if confirmed / positive: If vulnerable reachable package appears, prioritize vendor fix or mitigation  
+otherwise / stop: If not, continue provenance checks
+
+15-04 · if: Packages are installed from registries or mirrors  
+then inspect: Review package provenance, pinned versions, integrity, typosquatting and build script trust  
+if confirmed / positive: If untrusted source can change, assess compromise path  
+otherwise / stop: If controlled, inspect update policy
+
+15-05 · if: A build/release pipeline exists  
+then inspect: Review triggers, required reviews, isolation, secrets, artifact immutability and environment approvals  
+if confirmed / positive: If untrusted contributor can affect release, map threat  
+otherwise / stop: If protected, inspect emergency-release process
+
+15-06 · if: An SBOM or artifact attestation exists  
+then inspect: Compare it to deployed reality and release signature  
+if confirmed / positive: If mismatch, investigate tampering/configuration drift  
+otherwise / stop: If consistent, track through updates
+
+15-07 · if: A public release contains source maps, debug endpoints or test credentials  
+then inspect: Determine intended disclosure and whether secrets/privileged capabilities are exposed  
+if confirmed / positive: If actual secret, redact/rotate via owner process  
+otherwise / stop: If harmless source, avoid treating source visibility itself as exploit
+
+15-08 · if: An auto-update mechanism exists  
+then inspect: Check signed updates, rollback prevention, channel separation and trust anchors  
+if confirmed / positive: If update authenticity is not enforced, assess supply-chain impact  
+otherwise / stop: If signed, check key custody and revocation
+
+15-09 · if: A third-party SaaS integration exists  
+then inspect: Map OAuth grants, SSO, webhooks, vendor data sharing, contractual boundaries  
+if confirmed / positive: If unnecessary scope is granted, reduce permission  
+otherwise / stop: Do not probe vendor systems without permission
+
+16. mail, communications, and external trust
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+16-01 · if: A domain sends email  
+then inspect: Inventory SPF, DKIM, DMARC, provider alignment and legitimate sender inventory  
+if confirmed / positive: If misaligned, review spoofing/deliverability impact  
+otherwise / stop: If aligned, inspect outbound credential security
+
+16-02 · if: Inbound email services exist  
+then inspect: Review MX, TLS, account policy, anti-relay and mailbox security  
+if confirmed / positive: If unauthenticated relay is suspected, use vendor-approved non-delivery test only  
+otherwise / stop: If protected, check phishing controls
+
+16-03 · if: A support/contact form sends messages  
+then inspect: Review abuse limits, header injection protections, recipient restrictions and data handling  
+if confirmed / positive: If arbitrary destination or unlimited sending, reduce abuse surface  
+otherwise / stop: If safe, test account notifications
+
+16-04 · if: A mobile/SMS or push notification service exists  
+then inspect: Review callback signing, account binding, token expiry and delivery permissions  
+if confirmed / positive: If notification can leak authentication data, investigate  
+otherwise / stop: If safe, document third-party dependency
+
+16-05 · if: A third-party identity/payment/analytics script is embedded  
+then inspect: Map data shared across origins and compromise impact  
+if confirmed / positive: If unnecessary data shared, reduce scope  
+otherwise / stop: If required, check consent/security controls
+
+16-06 · if: An external domain is mentioned in config or page  
+then inspect: Classify it as asset, supplier, analytics, redirect or reference  
+if confirmed / positive: If confirmed owned and in scope, enqueue as root  
+otherwise / stop: Otherwise stop active investigation at link boundary
+
+17. detection, incident response, reliability, and resilience
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+17-01 · if: Security-relevant action occurs  
+then inspect: Verify logs capture actor, action, target, result and correlation identifiers without storing secrets  
+if confirmed / positive: If missing, add audit coverage  
+otherwise / stop: If recorded, inspect access and retention
+
+17-02 · if: Suspicious traffic or unusual account activity occurs  
+then inspect: Review detection rules, alert routing, triage owner and escalation SLAs  
+if confirmed / positive: If no reliable alert, document monitoring gap  
+otherwise / stop: If detection works, assess false-positive burden and response
+
+17-03 · if: An access credential or secret is compromised  
+then inspect: Review revocation, token/session invalidation, rotation and affected service tracing  
+if confirmed / positive: If exposure spreads, invoke incident process  
+otherwise / stop: If contained, confirm restoration and forensic evidence
+
+17-04 · if: An outage or denial-of-service risk exists  
+then inspect: Review rate limiting, queue bounds, circuit breakers, autoscaling and fail-closed semantics  
+if confirmed / positive: If failure can cascade, propose containment test in staging  
+otherwise / stop: If resilient, test recovery/visibility
+
+17-05 · if: Backups or disaster recovery are documented  
+then inspect: Verify isolation, restoration ability, credentials, integrity and recovery objectives  
+if confirmed / positive: If restore untested, schedule non-production exercise  
+otherwise / stop: If successful, keep evidence and retention plan
+
+17-06 · if: A security vulnerability is patched  
+then inspect: Retest original issue and adjacent functionality, including alternate URLs and versions  
+if confirmed / positive: If issue recurs, reopen with causal trace  
+otherwise / stop: If resolved in tested scope, label verified and monitor regressions
+
+17-07 · if: A privileged configuration change occurs  
+then inspect: Check approval, time, provenance, drift detection and alerting  
+if confirmed / positive: If untracked, prioritize change governance  
+otherwise / stop: If tracked, verify rollback works
+
+18. scoring, evidence, remediation, and recursion
+
+each branch follows: observed condition → inspection → conditional escalation → negative/unknown path.
+
+18-01 · if: A candidate weakness is observed  
+then inspect: Record affected asset, condition, reproduction evidence, scope, time, affected role, and observed outcome  
+if confirmed / positive: If safely repeatable and within scope, test controls and impact  
+otherwise / stop: If unverified, explicitly retain hypothesis state
+
+18-02 · if: A version matches a published CVE  
+then inspect: Confirm product identity, affected version/configuration, exposure, mitigations and reachability  
+if confirmed / positive: If applicability validated, prioritize remediation using actual risk  
+otherwise / stop: If not, mark not applicable/unknown rather than confirmed
+
+18-03 · if: A potential issue is reachable only after another issue  
+then inspect: Model prerequisite dependency as directed edge, not equal severity assertion  
+if confirmed / positive: If full chain is verified within authorization, explain compound impact  
+otherwise / stop: If chain untested, keep hypothetical edge
+
+18-04 · if: A finding has multiple possible root causes  
+then inspect: Record alternatives, choose safe discriminating tests and update confidence  
+if confirmed / positive: If evidence isolates cause, recommend narrow correction  
+otherwise / stop: If not, avoid claiming root cause certainty
+
+18-05 · if: A fix is proposed  
+then inspect: Name owner, exact control change, dependencies, rollback route and acceptance test  
+if confirmed / positive: If change is deployed, run targeted and regression tests  
+otherwise / stop: If not yet verified, label proposed/implemented not resolved
+
+18-06 · if: A test passes  
+then inspect: Record test identities, environment, version and conditions  
+if confirmed / positive: If that single scenario passed, close that test only  
+otherwise / stop: Do not infer global safety across unseen branches
+
+18-07 · if: All known in-scope assets and applicable tests have reached a disposition  
+then inspect: Report coverage percentages, exclusions, untested items and residual unknowns  
+if confirmed / positive: If new evidence appears, reopen affected branches  
+otherwise / stop: Otherwise stop this run; never claim total knowledge of all possible assets
+
+18-08 · if: A branch hits missing authorization, credentials, time, budget, or data  
+then inspect: Record exact blocker and needed evidence  
+if confirmed / positive: If permissions/evidence later supplied, resume appropriate branch  
+otherwise / stop: Otherwise mark not tested; do not quietly treat as passed
+
+18-09 · if: An asset has no new unresolved children after deduplication  
+then inspect: Mark local traversal complete at current time  
+if confirmed / positive: If technology or configuration changes, revisit  
+otherwise / stop: Completion is versioned and conditional, not permanent
+
+necessary distinctions and limitations
+
+• discovery ≠ ownership. a reference to payments.vendor.example is a relationship, not authorization to scan the vendor.
+• asset exists ≠ vulnerability exists. a login page and public port may be intentionally exposed; the control implementation matters.
+• banner/CVE match ≠ exploitation proof. verify component, configuration, reachability, mitigation and test constraints.
+• absence of findings ≠ secure. no credentials, internal code or control-plane access yields an incomplete assessment.
+• hypothesis ≠ cause. establish what failed and why using controlled evidence; a CDN, reverse proxy or error can confound measurements.
+• tests ≠ unlimited probing. observe rate limits, permit boundaries, privacy, production stability, and explicit exclusions.
+• a finite audit is time-indexed. report discovered inventory, coverage of applicable checks, excluded assets, unknowns and actual retests; schedule reassessment when technology changes.
+
+source foundations
+
+• OWASP Web Security Testing Guide, stable 4.2 and latest development content: https://owasp.org/projects/web-security-testing-guide
+• OWASP Application Security Verification Standard 5.0.0: https://asvs.owasp.org/
+• NIST SP 800-115, Technical Guide to Information Security Testing and Assessment: https://csrc.nist.gov/pubs/sp/800/115/final
+
+This tree is an original synthesis of established testing categories, engineering principles, and conditional decision modelling. It is not verbatim OWASP guidance or an automated vulnerability scanner. No specific domain was scanned.

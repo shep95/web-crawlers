@@ -1,0 +1,242 @@
+import Fastify from "fastify";
+import { describe, expect, it } from "vitest";
+import { lookalikes, attributeProvider } from "../src/domain-intel/collect.js";
+import { normalizeTarget, runDomainIntel, verificationValue } from "../src/domain-intel/engine.js";
+import { dnsTypeNumber, liveNet, type DnsResult, type HttpResult, type IntelNet, type TcpResult, type TlsResult } from "../src/domain-intel/net.js";
+import { FAMILIES, RULES } from "../src/domain-intel/rules.js";
+import { registerDomainIntelRoutes } from "../src/http/domain-routes.js";
+
+// A recorded-call fixture network. Nothing here touches the internet.
+type Calls = { dns: string[]; http: Array<{ url: string; headers?: Record<string, string> }>; tls: Array<{ host: string; min?: string }>; tcp: string[] };
+function fixtureNet(opts: { dns: Record<string, string[] | "NX" | "ERR">; http: Record<string, Partial<HttpResult>>; tls?: Record<string, Partial<TlsResult>>; legacyTls?: boolean; openPorts?: number[]; json?: Record<string, unknown> }): IntelNet & { calls: Calls } {
+  const calls: Calls = { dns: [], http: [], tls: [], tcp: [] };
+  return {
+    calls,
+    async dns(name, type): Promise<DnsResult> {
+      calls.dns.push(`${name}|${type}`);
+      const v = opts.dns[`${name}|${type}`];
+      if (v === "ERR") return { status: -1, ad: false, answers: [], error: "fixture: resolver unreachable" };
+      if (v === "NX") return { status: 3, ad: false, answers: [] };
+      return { status: 0, ad: false, answers: (v ?? []).map((data) => ({ name, type: dnsTypeNumber(type), TTL: 300, data })) };
+    },
+    async http(url, o = {}): Promise<HttpResult> {
+      calls.http.push({ url, headers: o.headers });
+      const r = (o.headers?.origin ? opts.http[url + "#cors"] : undefined) ?? opts.http[url];
+      const base: HttpResult = { url, finalUrl: url, status: 404, headers: { "content-type": "text/html" }, body: "<html><body>Not found</body></html>", truncated: false, redirects: [], remoteAddress: null, ms: 3 };
+      return { ...base, ...(r ?? {}), headers: { ...(r?.headers ?? base.headers) } };
+    },
+    async json(url) {
+      calls.http.push({ url });
+      return (opts.json?.[url] ?? null) as never;
+    },
+    async tls(host, o = {}): Promise<TlsResult> {
+      calls.tls.push({ host, min: o.minVersion });
+      if (o.minVersion && /TLSv1(\.1)?$/.test(o.minVersion)) return { host, port: 443, ok: !!opts.legacyTls, protocol: opts.legacyTls ? o.minVersion : null };
+      return { host, port: 443, ok: true, protocol: "TLSv1.3", cipher: "TLS_AES_128_GCM_SHA256", alpn: "h2", authorized: true, authorizationError: null, ...(opts.tls?.[host] ?? {}) } as TlsResult;
+    },
+    async tcp(host, port): Promise<TcpResult> {
+      calls.tcp.push(`${host}:${port}`);
+      const open = (opts.openPorts ?? []).includes(port);
+      return { host, port, open, banner: open && port === 6379 ? "-ERR unknown command" : undefined, ms: 1, error: open ? undefined : "ECONNREFUSED" };
+    },
+  };
+}
+
+const NOW = Date.parse("2026-11-04T12:00:00Z");
+const D = "fixture-shop.com";
+// Built at runtime so the repository never stores a scanner-matching literal (fake value).
+const FAKE_AWS = ["AKIA", "Q3EXAMPLE7FIXTUR"].join("");
+const page = `<!doctype html><html lang="en"><head><title>Fixture Shop</title><meta name="generator" content="WordPress 6.1.1"></head><body>
+<a href="/login">Sign in</a> <a href="/account/register">Create account</a> <a href="/forgot-password">Forgot password?</a>
+<a href="/orders/12345">Order</a> <a href="/go?next=/cart">Cart</a> <a href="/export/report.csv">Export</a> <a href="/search?q=a&page=2">Search</a>
+<a href="https://old.${D}/">Old site</a> <a href="https://github.com/fixture-shop">Code</a> <img src="http://cdn.${D}/x.png">
+<form action="/session" method="get"><input name="user"><input type="password" name="pw"></form>
+<form action="/contact" method="post"><input name="email"><textarea name="message"></textarea></form>
+<form action="/upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="x"><input type="file" name="f"></form>
+<script src="/static/app.js"></script><script src="https://www.googletagmanager.com/gtag/js?id=G-1"></script><script src="https://js.stripe.com/v3/"></script>
+<script>localStorage.setItem('a','b'); window.addEventListener('message', e => document.getElementById('x').innerHTML = e.data);</script>
+</body></html>`;
+const appJs = `fetch("/api/v2/cart");const ws=new WebSocket("wss://live.${D}/socket");const k="${FAKE_AWS}";\n//# sourceMappingURL=app.js.map`;
+
+function shopFixture(extra: { authorized?: boolean } = {}) {
+  return fixtureNet({
+    legacyTls: true,
+    openPorts: [6379],
+    dns: {
+      [`${D}|A`]: ["203.0.113.10"], [`${D}|NS`]: ["ns1.fixture-dns.net."], [`${D}|MX`]: ["10 mx.fixture-mail.net."], [`${D}|TXT`]: ["\"v=spf1 include:a.spf.test include:b.spf.test ?all\"", "\"google-site-verification=abc\""],
+      [`${D}|CAA`]: [], [`_dmarc.${D}|TXT`]: [], [`${D}|DS`]: [], [`old.${D}|CNAME`]: ["fixture-shop-old.herokuapp.com."], [`old.${D}|A`]: "NX",
+      [`www.${D}|CNAME`]: [`${D}.`], [`www.${D}|A`]: ["203.0.113.10"], [`selector1._domainkey.${D}|TXT`]: ["\"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC" + "A".repeat(150) + "\""],
+      "a.spf.test|TXT": ["\"v=spf1 include:c.spf.test include:d.spf.test include:e.spf.test include:f.spf.test ~all\""], "b.spf.test|TXT": ["\"v=spf1 include:g.spf.test include:h.spf.test include:i.spf.test include:j.spf.test -all\""],
+      [`fixtureshop.com|A`]: ["198.51.100.7"], [`_void-verify.${D}|TXT`]: extra.authorized ? [`"${verificationValue(D, "s3cret")}"`] : [],
+    },
+    json: {
+      [`https://rdap.org/domain/${D}`]: { status: ["active"], events: [{ eventAction: "registration", eventDate: "2015-01-01T00:00:00Z" }, { eventAction: "expiration", eventDate: "2026-11-24T00:00:00Z" }, { eventAction: "last changed", eventDate: "2026-10-01T00:00:00Z" }], entities: [{ roles: ["registrar"], vcardArray: ["vcard", [["fn", {}, "text", "Fixture Registrar"]]] }], nameservers: [{ ldhName: "ns1.fixture-dns.net" }], secureDNS: { delegationSigned: false } },
+      [`https://crt.sh/?q=${encodeURIComponent("%." + D)}&output=json&exclude=expired&deduplicate=Y`]: [{ name_value: `${D}\nwww.${D}`, issuer_name: "C=US, O=Let's Encrypt, CN=R11", not_before: "2026-10-20T00:00:00", not_after: "2027-01-18T00:00:00" }, { name_value: `old.${D}\nstaging.${D}`, issuer_name: "C=US, O=Let's Encrypt, CN=R10", not_before: "2025-01-01T00:00:00", not_after: "2027-04-01T00:00:00" }],
+      [`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(D + "/*")}&output=json&fl=original&collapse=urlkey&limit=400`]: [["original"], [`https://${D}/wp-admin/`], [`https://${D}/backup.sql`], [`https://${D}/about`]],
+      [`https://rdap.org/ip/203.0.113.10`]: { name: "FIXTURE-HOSTING", country: "US", entities: [{ vcardArray: ["vcard", [["fn", {}, "text", "Fixture Hosting LLC"]]] }] },
+    },
+    http: {
+      [`https://${D}/`]: { status: 200, headers: { "content-type": "text/html; charset=utf-8", server: "nginx/1.18.0", "x-powered-by": "PHP/7.4.3", "set-cookie": "PHPSESSID=abc123; path=/, theme=dark; Secure; SameSite=Lax", "cache-control": "public, max-age=600" }, body: page },
+      [`http://${D}/`]: { status: 200, headers: { "content-type": "text/html" }, body: "" },
+      [`https://${D}/static/app.js`]: { status: 200, headers: { "content-type": "application/javascript" }, body: appJs },
+      [`https://${D}/robots.txt`]: { status: 200, headers: { "content-type": "text/plain" }, body: "User-agent: *\nDisallow: /admin\nSitemap: https://fixture-shop.com/sitemap.xml" },
+      [`https://${D}/sitemap.xml`]: { status: 200, headers: { "content-type": "application/xml" }, body: "<urlset><url><loc>https://fixture-shop.com/a</loc></url></urlset>" },
+      [`https://${D}/.git/HEAD`]: { status: 200, headers: { "content-type": "text/plain" }, body: "ref: refs/heads/main\n" },
+      [`https://${D}/#cors`]: { status: 200, headers: { "content-type": "text/html", "access-control-allow-origin": "https://void-intel-origin-check.invalid", "access-control-allow-credentials": "true" }, body: "" },
+    },
+    tls: { [D]: { cert: { subject: `CN=${D}`, issuer: "C=US, O=Let's Encrypt, CN=R11", validFrom: "2026-08-20T00:00:00Z", validTo: "2026-11-14T00:00:00Z", san: [D, `www.${D}`], serial: "01", fingerprint256: "AA", bits: 2048, selfSigned: false, chainDepth: 2 } } },
+  });
+}
+
+describe("domain intelligence — target handling", () => {
+  it("normalizes input and refuses what is not a public domain", () => {
+    expect(normalizeTarget("https://Fixture-Shop.com/path?x=1")).toBe("fixture-shop.com");
+    expect(normalizeTarget("münchen.de")).toBe("xn--mnchen-3ya.de");
+    for (const bad of ["127.0.0.1", "localhost", "intranet.corp", "printer.local", "a", "x".repeat(400), "foo.internal", "db.lan", "javascript:alert(1)", "metadata.google.internal"]) expect(normalizeTarget(bad), bad).toBeNull();
+  });
+  it("the live network adapter refuses private and loopback addresses (no SSRF through domain runs)", async () => {
+    for (const ip of ["127.0.0.1", "10.0.0.5", "169.254.169.254", "192.168.1.1"]) {
+      const t = await liveNet.tcp(ip, 80, { timeoutMs: 500 });
+      expect(t.open).toBe(false);
+      expect(t.error).toMatch(/EGRESS_BLOCKED|non-public/);
+      const s = await liveNet.tls(ip, { timeoutMs: 500 });
+      expect(s.ok).toBe(false);
+    }
+  });
+  it("parses all 19 families and 188 rules of the map", () => {
+    expect(FAMILIES).toHaveLength(19);
+    expect(RULES).toHaveLength(188);
+    expect(new Set(RULES.map((r) => r.id)).size).toBe(188);
+  });
+  it("generates confusable variants for lookalike checks, none for platform subdomains", () => {
+    const v = lookalikes("fixture-shop.com").map((x) => x.name);
+    expect(v).toContain("fixtureshop.com".replace("fixtureshop", "fixture-shp"));
+    expect(v).toContain("fixture-shop.net");
+    expect(lookalikes("asherinvoid.vercel.app")).toEqual([]);
+  });
+  it("attributes platforms so their infrastructure is never treated as the target", () => {
+    expect(attributeProvider("asherinvoid.vercel.app")?.name).toBe("Vercel");
+    expect(attributeProvider("void-web-production.up.railway.app")?.name).toBe("Railway");
+    expect(attributeProvider("x.example.org", { "cf-ray": "1" })?.name).toBe("Cloudflare");
+  });
+});
+
+describe("domain intelligence — passive run", () => {
+  it("finds, chains and states evidence without any intrusive request", async () => {
+    const net = shopFixture();
+    const r = await runDomainIntel(`https://${D}/`, { net, ownedRoots: [], secret: "s3cret", now: () => NOW });
+    expect(r.scope.mode).toBe("passive");
+    // Every rule of the map has a disposition.
+    expect(r.rules).toHaveLength(188);
+    expect(r.coverage.dispositioned).toBe(188);
+    const titles = r.findings.map((f) => `${f.rule} ${f.title}`);
+    const has = (re: RegExp) => expect(titles.some((t) => re.test(t)), `${re} in\n${titles.join("\n")}`).toBe(true);
+    has(/02-03 Possible dangling DNS: old\.fixture-shop\.com/);
+    has(/02-07 No DMARC/);
+    has(/02-06 SPF ends with \?all/);
+    has(/02-06 SPF needs \d+ DNS lookups/);
+    has(/01-01 Domain registration expires in 20 days/);
+    has(/01-02 No registrar transfer lock/);
+    has(/04-01 TLS certificate expires in 10 days/);
+    has(/04-03 Plain HTTP serves content/);
+    has(/04-04 No HSTS/);
+    has(/12-02 No Content-Security-Policy/);
+    has(/06-03 Password form submits with GET/);
+    has(/15-07 Credential-like aws-access-key-id in public JavaScript/);
+    has(/07-01 Cookie PHPSESSID lacks Secure, HttpOnly, SameSite/);
+    has(/13-08 Response sets cookies but is marked publicly cacheable/);
+    has(/03-08 Software version disclosed/);
+    has(/05-09 Public JavaScript references source maps/);
+    has(/04-09 Redirect parameter in links/);
+    has(/02-09 No CAA record/);
+    has(/05-10 .*archived URLs/);
+    has(/12-01 .*third-party scripts without Subresource Integrity/);
+    has(/04-03 HTTPS page references plain-HTTP resources/);
+    // States follow the map: the dangling CNAME is a hypothesis with an 8-step chain, not a claimed takeover.
+    const dangling = r.findings.find((f) => f.rule === "02-03")!;
+    expect(dangling.state).toBe("hypothesized");
+    expect(dangling.chain).toHaveLength(8);
+    expect(dangling.chain.filter((s) => s.state === "not-tested")).toHaveLength(3);
+    // The secret value is never in the report.
+    expect(JSON.stringify(r)).not.toContain(FAKE_AWS);
+    // Cookie values are masked.
+    expect(JSON.stringify(r.findings)).not.toContain("abc123");
+    // Passive: no sensitive-path probes, no Origin header test, no legacy TLS, no port probes except the SMTP MX.
+    expect(net.calls.http.some((c) => /\.git\/HEAD|\.env|server-status|backup\.zip/.test(c.url))).toBe(false);
+    expect(net.calls.http.some((c) => c.headers?.origin)).toBe(false);
+    expect(net.calls.tls.some((c) => c.min)).toBe(false);
+    expect(net.calls.tcp.every((c) => c.endsWith(":25"))).toBe(true);
+    // Authorized-only rules are reported as not tested, with the reason.
+    expect(r.rules.find((x) => x.id === "03-05")!.status).toBe("not-tested");
+    expect(r.rules.find((x) => x.id === "08-01")!.status).toBe("not-tested");
+    // Recursion: CNAME, certificate-log and link discoveries became nodes; the MX/NS hosts are references.
+    expect(r.hosts.map((h) => h.host)).toEqual(expect.arrayContaining([D, `www.${D}`, `old.${D}`, `staging.${D}`]));
+    expect(r.hosts.find((h) => h.host === "mx.fixture-mail.net")?.reference).toBe(true);
+    expect(r.edges.some((e) => e.from === `old.${D}` && e.to === "fixture-shop-old.herokuapp.com" && e.kind === "CNAME")).toBe(true);
+    // Decision graph path and workflow are reported for the diagrams.
+    expect(r.decision).toMatchObject({ passive: true, authorized: false, web: true, auth: true, dataEndpoints: true });
+    expect(r.workflow.map((w) => w.id)).toEqual(["scope", "registration", "traverse", "analyze"]);
+    expect(r.unknowns.join(" ")).toMatch(/Authorized-only checks .* were not run/);
+  });
+
+  it("reports nothing as missing when lookups fail (blind run)", async () => {
+    const net = fixtureNet({ dns: new Proxy({}, { get: () => "ERR" }) as Record<string, "ERR">, http: {} });
+    const r = await runDomainIntel("unreachable-fixture.org", { net, ownedRoots: [], secret: "x", now: () => NOW });
+    expect(r.findings).toEqual([]);
+    expect(r.rules.filter((x) => x.status === "not-observed")).toEqual([]);
+    expect(r.unknowns[0]).toMatch(/could not be observed/);
+  });
+});
+
+describe("domain intelligence — authorized run (owner-verified)", () => {
+  it("unlocks owner-only checks by DNS proof and validates findings", async () => {
+    const net = shopFixture({ authorized: true });
+    const r = await runDomainIntel(D, { net, ownedRoots: [], secret: "s3cret", now: () => NOW });
+    expect(r.scope.mode).toBe("authorized");
+    expect(r.scope.reason).toMatch(/_void-verify/);
+    const f = (re: RegExp) => r.findings.find((x) => re.test(x.title));
+    expect(f(/\/\.git\/HEAD is publicly served/)).toMatchObject({ severity: "critical", state: "validated" });
+    expect(f(/TLSv1\.0 is still accepted/)).toMatchObject({ state: "validated" });
+    expect(f(/CORS reflects arbitrary origins with credentials/)).toMatchObject({ severity: "high", state: "validated" });
+    expect(f(/Port 6379 is reachable/)).toMatchObject({ severity: "high" });
+    // Each address is probed once even when several hostnames share it.
+    expect(net.calls.tcp.filter((c) => c === "203.0.113.10:6379")).toHaveLength(1);
+    // Exposure checks keep a signature match only; the file contents never reach the report.
+    expect(JSON.stringify(r)).not.toContain("refs/heads/main");
+  });
+  it("never probes ports on shared platform infrastructure, even when owned (00-02)", async () => {
+    const net = fixtureNet({
+      openPorts: [22],
+      dns: { "void-fixture.vercel.app|A": ["76.76.21.21"] },
+      http: { "https://void-fixture.vercel.app/": { status: 200, headers: { "content-type": "text/html", server: "Vercel", "x-vercel-id": "iad1::x" }, body: "<html><head><title>v</title></head><body></body></html>" } },
+    });
+    const r = await runDomainIntel("void-fixture.vercel.app", { net, ownedRoots: ["void-fixture.vercel.app"], secret: "x", now: () => NOW });
+    expect(r.scope.mode).toBe("authorized");
+    expect(net.calls.tcp).toEqual([]);
+    expect(r.hosts[0].provider?.name).toBe("Vercel");
+    expect(r.hosts.map((h) => h.host)).not.toContain("www.void-fixture.vercel.app");
+  });
+});
+
+describe("domain intelligence — HTTP API", () => {
+  it("validates input, returns the report, caches and rate-limits", async () => {
+    const app = Fastify();
+    const net = shopFixture();
+    registerDomainIntelRoutes(app, { net, ownedRoots: [], secret: "s3cret" });
+    await app.ready();
+    expect((await app.inject({ url: "/api/v2/domain-intel?domain=127.0.0.1" })).statusCode).toBe(400);
+    expect((await app.inject({ url: "/api/v2/domain-intel?domain=" })).statusCode).toBe(400);
+    const ok = await app.inject({ url: `/api/v2/domain-intel?domain=${D}` });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().rules).toHaveLength(188);
+    const again = await app.inject({ url: `/api/v2/domain-intel?domain=${D}` });
+    expect(again.headers["x-domain-intel-cache"]).toBe("hit");
+    const v = await app.inject({ url: `/api/v2/domain-intel/verification?domain=www.${D}` });
+    expect(v.json()).toMatchObject({ domain: D, record: `_void-verify.${D}`, value: verificationValue(D, "s3cret") });
+    expect((await app.inject({ url: "/api/v2/domain-intel/rules" })).json().rules).toHaveLength(188);
+    let limited = 0;
+    for (let i = 0; i < 25; i++) if ((await app.inject({ url: `/api/v2/domain-intel?domain=n${i}-fixture.com&fresh=1` })).statusCode === 429) limited++;
+    expect(limited).toBeGreaterThan(0);
+    await app.close();
+  }, 30_000);
+});

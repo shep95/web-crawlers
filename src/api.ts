@@ -27,6 +27,7 @@ import { prioritizeSeedsForQuestion } from "./chat/retrieval-ranker.js";
 import { registerV2 } from "./http/v2.js";
 import { registerCorpusRoutes } from "./http/corpus-routes.js";
 import { registerTextRoutes } from "./http/text-routes.js";
+import { registerDomainIntelRoutes } from "./http/domain-routes.js";
 import { openCorpus } from "./corpus/pg-store.js";
 import type { Corpus, CrawlerProfile } from "./corpus/types.js";
 import { AutonomousCrawler } from "./corpus/crawler.js";
@@ -108,6 +109,7 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
   const crawlers = crawlerOn ? profiles.map((profile) => new AutonomousCrawler({ store, profile, renderer })) : [];
   registerCorpusRoutes(app, { store, crawlers, keys, topicalDiscovery: process.env.TOPICAL_DISCOVERY !== "off" });
   registerTextRoutes(app, { store });
+  registerDomainIntelRoutes(app);
   app.addHook("onReady", async () => crawlers.forEach((c) => c.start()));
   app.addHook("onClose", async () => {
     await Promise.all(crawlers.map((c) => c.stop()));
