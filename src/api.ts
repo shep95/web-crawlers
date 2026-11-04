@@ -28,6 +28,7 @@ import { registerV2 } from "./http/v2.js";
 import { registerCorpusRoutes } from "./http/corpus-routes.js";
 import { registerTextRoutes } from "./http/text-routes.js";
 import { registerDomainIntelRoutes } from "./http/domain-routes.js";
+import { registerPersonRoutes } from "./http/person-routes.js";
 import { memoryStatus } from "./corpus/memory-guard.js";
 import { openCorpus } from "./corpus/pg-store.js";
 import type { Corpus, CrawlerProfile } from "./corpus/types.js";
@@ -112,6 +113,7 @@ export async function buildApp(config: AppConfig, opts: BuildOptions = {}): Prom
   registerCorpusRoutes(app, { store, crawlers, keys, topicalDiscovery: process.env.TOPICAL_DISCOVERY !== "off" });
   registerTextRoutes(app, { store });
   registerDomainIntelRoutes(app);
+  registerPersonRoutes(app, { store, topicalDiscovery: process.env.TOPICAL_DISCOVERY !== "off" });
   app.addHook("onReady", async () => crawlers.forEach((c) => c.start()));
   app.addHook("onClose", async () => {
     await Promise.all(crawlers.map((c) => c.stop()));

@@ -1,0 +1,986 @@
+[
+ {
+  "q": "@human Ada Lovelace",
+  "expect": {
+   "status": 200,
+   "name": "Ada Lovelace"
+  },
+  "note": "public figure, name only",
+  "id": 1
+ },
+ {
+  "q": "@human Alan Turing",
+  "expect": {
+   "status": 200,
+   "name": "Alan Turing"
+  },
+  "note": "public figure, name only",
+  "id": 2
+ },
+ {
+  "q": "@human Marie Curie",
+  "expect": {
+   "status": 200,
+   "name": "Marie Curie"
+  },
+  "note": "public figure, name only",
+  "id": 3
+ },
+ {
+  "q": "@human Albert Einstein",
+  "expect": {
+   "status": 200,
+   "name": "Albert Einstein"
+  },
+  "note": "public figure, name only",
+  "id": 4
+ },
+ {
+  "q": "@human Isaac Newton",
+  "expect": {
+   "status": 200,
+   "name": "Isaac Newton"
+  },
+  "note": "public figure, name only",
+  "id": 5
+ },
+ {
+  "q": "@human Charles Darwin",
+  "expect": {
+   "status": 200,
+   "name": "Charles Darwin"
+  },
+  "note": "public figure, name only",
+  "id": 6
+ },
+ {
+  "q": "@human Nikola Tesla",
+  "expect": {
+   "status": 200,
+   "name": "Nikola Tesla"
+  },
+  "note": "public figure, name only",
+  "id": 7
+ },
+ {
+  "q": "@human Grace Hopper",
+  "expect": {
+   "status": 200,
+   "name": "Grace Hopper"
+  },
+  "note": "public figure, name only",
+  "id": 8
+ },
+ {
+  "q": "@human Rosalind Franklin",
+  "expect": {
+   "status": 200,
+   "name": "Rosalind Franklin"
+  },
+  "note": "public figure, name only",
+  "id": 9
+ },
+ {
+  "q": "@human Katherine Johnson",
+  "expect": {
+   "status": 200,
+   "name": "Katherine Johnson"
+  },
+  "note": "public figure, name only",
+  "id": 10
+ },
+ {
+  "q": "@human Abraham Lincoln",
+  "expect": {
+   "status": 200,
+   "name": "Abraham Lincoln"
+  },
+  "note": "public figure, name only",
+  "id": 11
+ },
+ {
+  "q": "@human Frederick Douglass",
+  "expect": {
+   "status": 200,
+   "name": "Frederick Douglass"
+  },
+  "note": "public figure, name only",
+  "id": 12
+ },
+ {
+  "q": "@human Harriet Tubman",
+  "expect": {
+   "status": 200,
+   "name": "Harriet Tubman"
+  },
+  "note": "public figure, name only",
+  "id": 13
+ },
+ {
+  "q": "@human Winston Churchill",
+  "expect": {
+   "status": 200,
+   "name": "Winston Churchill"
+  },
+  "note": "public figure, name only",
+  "id": 14
+ },
+ {
+  "q": "@human Nelson Mandela",
+  "expect": {
+   "status": 200,
+   "name": "Nelson Mandela"
+  },
+  "note": "public figure, name only",
+  "id": 15
+ },
+ {
+  "q": "@human Mahatma Gandhi",
+  "expect": {
+   "status": 200,
+   "name": "Mahatma Gandhi"
+  },
+  "note": "public figure, name only",
+  "id": 16
+ },
+ {
+  "q": "@human Martin Luther King",
+  "expect": {
+   "status": 200,
+   "name": "Martin Luther King"
+  },
+  "note": "public figure, name only",
+  "id": 17
+ },
+ {
+  "q": "@human Florence Nightingale",
+  "expect": {
+   "status": 200,
+   "name": "Florence Nightingale"
+  },
+  "note": "public figure, name only",
+  "id": 18
+ },
+ {
+  "q": "@human Amelia Earhart",
+  "expect": {
+   "status": 200,
+   "name": "Amelia Earhart"
+  },
+  "note": "public figure, name only",
+  "id": 19
+ },
+ {
+  "q": "@human Neil Armstrong",
+  "expect": {
+   "status": 200,
+   "name": "Neil Armstrong"
+  },
+  "note": "public figure, name only",
+  "id": 20
+ },
+ {
+  "q": "@human William Shakespeare",
+  "expect": {
+   "status": 200,
+   "name": "William Shakespeare"
+  },
+  "note": "public figure, name only",
+  "id": 21
+ },
+ {
+  "q": "@human Jane Austen",
+  "expect": {
+   "status": 200,
+   "name": "Jane Austen"
+  },
+  "note": "public figure, name only",
+  "id": 22
+ },
+ {
+  "q": "@human Charles Dickens",
+  "expect": {
+   "status": 200,
+   "name": "Charles Dickens"
+  },
+  "note": "public figure, name only",
+  "id": 23
+ },
+ {
+  "q": "@human Mark Twain",
+  "expect": {
+   "status": 200,
+   "name": "Mark Twain"
+  },
+  "note": "public figure, name only",
+  "id": 24
+ },
+ {
+  "q": "@human Virginia Woolf",
+  "expect": {
+   "status": 200,
+   "name": "Virginia Woolf"
+  },
+  "note": "public figure, name only",
+  "id": 25
+ },
+ {
+  "q": "@human Leo Tolstoy",
+  "expect": {
+   "status": 200,
+   "name": "Leo Tolstoy"
+  },
+  "note": "public figure, name only",
+  "id": 26
+ },
+ {
+  "q": "@human Toni Morrison",
+  "expect": {
+   "status": 200,
+   "name": "Toni Morrison"
+  },
+  "note": "public figure, name only",
+  "id": 27
+ },
+ {
+  "q": "@human Maya Angelou",
+  "expect": {
+   "status": 200,
+   "name": "Maya Angelou"
+  },
+  "note": "public figure, name only",
+  "id": 28
+ },
+ {
+  "q": "@human Ernest Hemingway",
+  "expect": {
+   "status": 200,
+   "name": "Ernest Hemingway"
+  },
+  "note": "public figure, name only",
+  "id": 29
+ },
+ {
+  "q": "@human Emily Dickinson",
+  "expect": {
+   "status": 200,
+   "name": "Emily Dickinson"
+  },
+  "note": "public figure, name only",
+  "id": 30
+ },
+ {
+  "q": "@human Ada Lovelace (London)",
+  "expect": {
+   "status": 200,
+   "name": "Ada Lovelace",
+   "location": "London"
+  },
+  "note": "with location",
+  "id": 31
+ },
+ {
+  "q": "@human Alan Turing (Manchester)",
+  "expect": {
+   "status": 200,
+   "name": "Alan Turing",
+   "location": "Manchester"
+  },
+  "note": "with location",
+  "id": 32
+ },
+ {
+  "q": "@human Marie Curie (Paris)",
+  "expect": {
+   "status": 200,
+   "name": "Marie Curie",
+   "location": "Paris"
+  },
+  "note": "with location",
+  "id": 33
+ },
+ {
+  "q": "@human Albert Einstein (Princeton)",
+  "expect": {
+   "status": 200,
+   "name": "Albert Einstein",
+   "location": "Princeton"
+  },
+  "note": "with location",
+  "id": 34
+ },
+ {
+  "q": "@human Isaac Newton (Cambridge)",
+  "expect": {
+   "status": 200,
+   "name": "Isaac Newton",
+   "location": "Cambridge"
+  },
+  "note": "with location",
+  "id": 35
+ },
+ {
+  "q": "@human Charles Darwin (Shrewsbury)",
+  "expect": {
+   "status": 200,
+   "name": "Charles Darwin",
+   "location": "Shrewsbury"
+  },
+  "note": "with location",
+  "id": 36
+ },
+ {
+  "q": "@human Nikola Tesla (New York)",
+  "expect": {
+   "status": 200,
+   "name": "Nikola Tesla",
+   "location": "New York"
+  },
+  "note": "with location",
+  "id": 37
+ },
+ {
+  "q": "@human Grace Hopper (Arlington, VA)",
+  "expect": {
+   "status": 200,
+   "name": "Grace Hopper",
+   "location": "Arlington, VA"
+  },
+  "note": "with location",
+  "id": 38
+ },
+ {
+  "q": "@human Abraham Lincoln (Springfield, IL)",
+  "expect": {
+   "status": 200,
+   "name": "Abraham Lincoln",
+   "location": "Springfield, IL"
+  },
+  "note": "with location",
+  "id": 39
+ },
+ {
+  "q": "@human Frederick Douglass (Rochester, NY)",
+  "expect": {
+   "status": 200,
+   "name": "Frederick Douglass",
+   "location": "Rochester, NY"
+  },
+  "note": "with location",
+  "id": 40
+ },
+ {
+  "q": "@human Harriet Tubman (Auburn, NY)",
+  "expect": {
+   "status": 200,
+   "name": "Harriet Tubman",
+   "location": "Auburn, NY"
+  },
+  "note": "with location",
+  "id": 41
+ },
+ {
+  "q": "@human Winston Churchill (London)",
+  "expect": {
+   "status": 200,
+   "name": "Winston Churchill",
+   "location": "London"
+  },
+  "note": "with location",
+  "id": 42
+ },
+ {
+  "q": "@human Nelson Mandela (Johannesburg)",
+  "expect": {
+   "status": 200,
+   "name": "Nelson Mandela",
+   "location": "Johannesburg"
+  },
+  "note": "with location",
+  "id": 43
+ },
+ {
+  "q": "@human Mahatma Gandhi (Ahmedabad)",
+  "expect": {
+   "status": 200,
+   "name": "Mahatma Gandhi",
+   "location": "Ahmedabad"
+  },
+  "note": "with location",
+  "id": 44
+ },
+ {
+  "q": "@human Florence Nightingale (London)",
+  "expect": {
+   "status": 200,
+   "name": "Florence Nightingale",
+   "location": "London"
+  },
+  "note": "with location",
+  "id": 45
+ },
+ {
+  "q": "@human Amelia Earhart (Atchison, Kansas)",
+  "expect": {
+   "status": 200,
+   "name": "Amelia Earhart",
+   "location": "Atchison, Kansas"
+  },
+  "note": "with location",
+  "id": 46
+ },
+ {
+  "q": "@human Neil Armstrong (Wapakoneta, Ohio)",
+  "expect": {
+   "status": 200,
+   "name": "Neil Armstrong",
+   "location": "Wapakoneta, Ohio"
+  },
+  "note": "with location",
+  "id": 47
+ },
+ {
+  "q": "@human Mark Twain (Hartford, CT)",
+  "expect": {
+   "status": 200,
+   "name": "Mark Twain",
+   "location": "Hartford, CT"
+  },
+  "note": "with location",
+  "id": 48
+ },
+ {
+  "q": "@human Jane Austen (Bath)",
+  "expect": {
+   "status": 200,
+   "name": "Jane Austen",
+   "location": "Bath"
+  },
+  "note": "with location",
+  "id": 49
+ },
+ {
+  "q": "@human Charles Dickens (Portsmouth)",
+  "expect": {
+   "status": 200,
+   "name": "Charles Dickens",
+   "location": "Portsmouth"
+  },
+  "note": "with location",
+  "id": 50
+ },
+ {
+  "q": "@human Ada Lovelace (1815-12-10)",
+  "expect": {
+   "status": 200,
+   "name": "Ada Lovelace",
+   "bornYear": 1815
+  },
+  "note": "with birthday",
+  "id": 51
+ },
+ {
+  "q": "@human Alan Turing (June 23, 1912)",
+  "expect": {
+   "status": 200,
+   "name": "Alan Turing",
+   "bornYear": 1912
+  },
+  "note": "with birthday",
+  "id": 52
+ },
+ {
+  "q": "@human Marie Curie (7 November 1867)",
+  "expect": {
+   "status": 200,
+   "name": "Marie Curie",
+   "bornYear": 1867
+  },
+  "note": "with birthday",
+  "id": 53
+ },
+ {
+  "q": "@human Albert Einstein (03/14/1879)",
+  "expect": {
+   "status": 200,
+   "name": "Albert Einstein",
+   "bornYear": 1879
+  },
+  "note": "with birthday",
+  "id": 54
+ },
+ {
+  "q": "@human Isaac Newton (1643)",
+  "expect": {
+   "status": 200,
+   "name": "Isaac Newton",
+   "bornYear": 1643
+  },
+  "note": "with birthday",
+  "id": 55
+ },
+ {
+  "q": "@human Charles Darwin (February 12 1809)",
+  "expect": {
+   "status": 200,
+   "name": "Charles Darwin",
+   "bornYear": 1809
+  },
+  "note": "with birthday",
+  "id": 56
+ },
+ {
+  "q": "@human Nikola Tesla (10 Jul 1856)",
+  "expect": {
+   "status": 200,
+   "name": "Nikola Tesla",
+   "bornYear": 1856
+  },
+  "note": "with birthday",
+  "id": 57
+ },
+ {
+  "q": "@human Grace Hopper (1906-12-09)",
+  "expect": {
+   "status": 200,
+   "name": "Grace Hopper",
+   "bornYear": 1906
+  },
+  "note": "with birthday",
+  "id": 58
+ },
+ {
+  "q": "@human Abraham Lincoln (Feb 12, 1809)",
+  "expect": {
+   "status": 200,
+   "name": "Abraham Lincoln",
+   "bornYear": 1809
+  },
+  "note": "with birthday",
+  "id": 59
+ },
+ {
+  "q": "@human Frederick Douglass (1818)",
+  "expect": {
+   "status": 200,
+   "name": "Frederick Douglass",
+   "bornYear": 1818
+  },
+  "note": "with birthday",
+  "id": 60
+ },
+ {
+  "q": "@human Winston Churchill (30/11/1874)",
+  "expect": {
+   "status": 200,
+   "name": "Winston Churchill",
+   "bornYear": 1874
+  },
+  "note": "with birthday",
+  "id": 61
+ },
+ {
+  "q": "@human Nelson Mandela (July 18, 1918)",
+  "expect": {
+   "status": 200,
+   "name": "Nelson Mandela",
+   "bornYear": 1918
+  },
+  "note": "with birthday",
+  "id": 62
+ },
+ {
+  "q": "@human Mahatma Gandhi (2 October 1869)",
+  "expect": {
+   "status": 200,
+   "name": "Mahatma Gandhi",
+   "bornYear": 1869
+  },
+  "note": "with birthday",
+  "id": 63
+ },
+ {
+  "q": "@human Florence Nightingale (1820-05-12)",
+  "expect": {
+   "status": 200,
+   "name": "Florence Nightingale",
+   "bornYear": 1820
+  },
+  "note": "with birthday",
+  "id": 64
+ },
+ {
+  "q": "@human Amelia Earhart (July 24, 1897)",
+  "expect": {
+   "status": 200,
+   "name": "Amelia Earhart",
+   "bornYear": 1897
+  },
+  "note": "with birthday",
+  "id": 65
+ },
+ {
+  "q": "@human Neil Armstrong (August 5, 1930)",
+  "expect": {
+   "status": 200,
+   "name": "Neil Armstrong",
+   "bornYear": 1930
+  },
+  "note": "with birthday",
+  "id": 66
+ },
+ {
+  "q": "@human Mark Twain (November 30, 1835)",
+  "expect": {
+   "status": 200,
+   "name": "Mark Twain",
+   "bornYear": 1835
+  },
+  "note": "with birthday",
+  "id": 67
+ },
+ {
+  "q": "@human Jane Austen (16 December 1775)",
+  "expect": {
+   "status": 200,
+   "name": "Jane Austen",
+   "bornYear": 1775
+  },
+  "note": "with birthday",
+  "id": 68
+ },
+ {
+  "q": "@human Charles Dickens (7 Feb 1812)",
+  "expect": {
+   "status": 200,
+   "name": "Charles Dickens",
+   "bornYear": 1812
+  },
+  "note": "with birthday",
+  "id": 69
+ },
+ {
+  "q": "@human Toni Morrison (1931-02-18)",
+  "expect": {
+   "status": 200,
+   "name": "Toni Morrison",
+   "bornYear": 1931
+  },
+  "note": "with birthday",
+  "id": 70
+ },
+ {
+  "q": "@human Ada Lovelace (London) (1815)",
+  "expect": {
+   "status": 200,
+   "name": "Ada Lovelace",
+   "location": "London",
+   "bornYear": 1815
+  },
+  "order": "events",
+  "note": "location and birthday",
+  "id": 71
+ },
+ {
+  "q": "@human Alan Turing (1912-06-23) (London)",
+  "expect": {
+   "status": 200,
+   "name": "Alan Turing",
+   "location": "London",
+   "bornYear": 1912
+  },
+  "order": "events",
+  "dir": "desc",
+  "note": "location and birthday (birthday first)",
+  "id": 72
+ },
+ {
+  "q": "@human Marie Curie (Warsaw) (1867)",
+  "expect": {
+   "status": 200,
+   "name": "Marie Curie",
+   "location": "Warsaw",
+   "bornYear": 1867
+  },
+  "dir": "desc",
+  "note": "location and birthday",
+  "id": 73
+ },
+ {
+  "q": "@human Albert Einstein (1879-03-14) (Ulm)",
+  "expect": {
+   "status": 200,
+   "name": "Albert Einstein",
+   "location": "Ulm",
+   "bornYear": 1879
+  },
+  "order": "relevance",
+  "note": "location and birthday (birthday first)",
+  "id": 74
+ },
+ {
+  "q": "@human Charles Darwin (Shrewsbury) (1809)",
+  "expect": {
+   "status": 200,
+   "name": "Charles Darwin",
+   "location": "Shrewsbury",
+   "bornYear": 1809
+  },
+  "order": "events",
+  "show": "match",
+  "note": "location and birthday",
+  "id": 75
+ },
+ {
+  "q": "@human Nikola Tesla (1856) (Smiljan)",
+  "expect": {
+   "status": 200,
+   "name": "Nikola Tesla",
+   "location": "Smiljan",
+   "bornYear": 1856
+  },
+  "show": "match,possible",
+  "note": "location and birthday (birthday first)",
+  "id": 76
+ },
+ {
+  "q": "@human Abraham Lincoln (Kentucky) (1809-02-12)",
+  "expect": {
+   "status": 200,
+   "name": "Abraham Lincoln",
+   "location": "Kentucky",
+   "bornYear": 1809
+  },
+  "order": "events",
+  "note": "location and birthday",
+  "id": 77
+ },
+ {
+  "q": "@human Winston Churchill (1874) (Blenheim)",
+  "expect": {
+   "status": 200,
+   "name": "Winston Churchill",
+   "location": "Blenheim",
+   "bornYear": 1874
+  },
+  "order": "events",
+  "dir": "desc",
+  "note": "location and birthday (birthday first)",
+  "id": 78
+ },
+ {
+  "q": "@human Nelson Mandela (Mvezo) (1918)",
+  "expect": {
+   "status": 200,
+   "name": "Nelson Mandela",
+   "location": "Mvezo",
+   "bornYear": 1918
+  },
+  "show": "other",
+  "note": "location and birthday",
+  "id": 79
+ },
+ {
+  "q": "@human Neil Armstrong (1930) (Ohio)",
+  "expect": {
+   "status": 200,
+   "name": "Neil Armstrong",
+   "location": "Ohio",
+   "bornYear": 1930
+  },
+  "order": "events",
+  "note": "location and birthday (birthday first)",
+  "id": 80
+ },
+ {
+  "q": "@human Amelia Earhart, Atchison, born 1897",
+  "expect": {
+   "status": 200,
+   "name": "Amelia Earhart",
+   "location": "Atchison",
+   "bornYear": 1897
+  },
+  "note": "plain comma form",
+  "id": 81
+ },
+ {
+  "q": "@human Mark Twain from Hannibal",
+  "expect": {
+   "status": 200,
+   "name": "Mark Twain",
+   "location": "Hannibal"
+  },
+  "note": "'from' form",
+  "id": 82
+ },
+ {
+  "q": "@person Grace Hopper",
+  "expect": {
+   "status": 200,
+   "name": "Grace Hopper"
+  },
+  "note": "@person alias",
+  "id": 83
+ },
+ {
+  "q": "@people Rosalind Franklin (1920)",
+  "expect": {
+   "status": 200,
+   "name": "Rosalind Franklin",
+   "bornYear": 1920
+  },
+  "note": "@people alias",
+  "id": 84
+ },
+ {
+  "q": "@HUMAN katherine johnson",
+  "expect": {
+   "status": 200,
+   "name": "katherine johnson"
+  },
+  "note": "upper-case keyword, lower-case name",
+  "id": 85
+ },
+ {
+  "q": "@human Dr. Martin Luther King Jr.",
+  "expect": {
+   "status": 200,
+   "name": "Martin Luther King"
+  },
+  "note": "honorific and suffix dropped",
+  "id": 86
+ },
+ {
+  "q": "@human Gabriel García Márquez (Aracataca)",
+  "expect": {
+   "status": 200,
+   "name": "Gabriel García Márquez",
+   "location": "Aracataca"
+  },
+  "note": "accents",
+  "id": 87
+ },
+ {
+  "q": "@human Frida Kahlo (Coyoacán) (1907-07-06)",
+  "expect": {
+   "status": 200,
+   "name": "Frida Kahlo",
+   "location": "Coyoacán",
+   "bornYear": 1907
+  },
+  "note": "accented location",
+  "id": 88
+ },
+ {
+  "q": "@human 夏目 漱石",
+  "expect": {
+   "status": 200,
+   "name": "夏目 漱石"
+  },
+  "note": "Japanese name",
+  "id": 89
+ },
+ {
+  "q": "@human Мария Кюри",
+  "expect": {
+   "status": 200,
+   "name": "Мария Кюри"
+  },
+  "note": "Cyrillic name",
+  "id": 90
+ },
+ {
+  "q": "@human نجيب محفوظ",
+  "expect": {
+   "status": 200,
+   "name": "نجيب محفوظ"
+  },
+  "note": "Arabic name",
+  "id": 91
+ },
+ {
+  "q": "@human Einstein",
+  "expect": {
+   "status": 200,
+   "name": "Einstein"
+  },
+  "note": "one-word name (warns, still searches)",
+  "id": 92
+ },
+ {
+  "q": "@human Albert Einstein (someday)",
+  "expect": {
+   "status": 200,
+   "name": "Albert Einstein",
+   "location": "someday"
+  },
+  "note": "text in parentheses that is not a date is read as a location",
+  "id": 93
+ },
+ {
+  "q": "@human Albert Einstein (1879-02-30)",
+  "expect": {
+   "status": 200,
+   "name": "Albert Einstein",
+   "location": "1879-02-30"
+  },
+  "note": "impossible date is not used as a birthday",
+  "id": 94
+ },
+ {
+  "q": "@human Isaac Newton (12/25/1642) (Woolsthorpe)",
+  "expect": {
+   "status": 200,
+   "name": "Isaac Newton",
+   "location": "Woolsthorpe",
+   "bornYear": 1642
+  },
+  "note": "US-style date",
+  "id": 95
+ },
+ {
+  "q": "@human",
+  "expect": {
+   "status": 400
+  },
+  "note": "no name",
+  "id": 96
+ },
+ {
+  "q": "@human (London) (1815)",
+  "expect": {
+   "status": 400
+  },
+  "note": "only optional parts",
+  "id": 97
+ },
+ {
+  "q": "@human Jean-Paul Sartre",
+  "expect": {
+   "status": 200,
+   "name": "Jean-Paul Sartre"
+  },
+  "note": "hyphenated first name",
+  "id": 98
+ },
+ {
+  "q": "@human Sinéad O'Connor",
+  "expect": {
+   "status": 200,
+   "name": "Sinéad O'Connor"
+  },
+  "note": "apostrophe in surname",
+  "id": 99
+ },
+ {
+  "q": "@human Ludwig van Beethoven (Bonn) (December 1770)",
+  "expect": {
+   "status": 200,
+   "name": "Ludwig van Beethoven",
+   "location": "Bonn",
+   "bornYear": 1770
+  },
+  "note": "particle in name; month-year birthday",
+  "id": 100
+ }
+]
