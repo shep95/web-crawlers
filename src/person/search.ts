@@ -49,7 +49,7 @@ const toIso = (s: string | null | undefined) => {
 /** Publication dates outside printing-to-next-year (a "1025" typo for 2025, a far-future date) are not dates. */
 const plausible = (iso: string | null) => {
   // 1970-01-01T00:00:00Z is the zero timestamp a server sends when it has no date.
-  if (!iso || iso.startsWith("1970-01-01")) return null; // any zone offset of the zero timestamp
+  if (!iso || Math.abs(Date.parse(iso)) < 36 * 3_600_000) return null; // the zero timestamp, in any time zone
   const y = +iso.slice(0, 4);
   return y >= 1450 && y <= new Date().getUTCFullYear() + 1 ? iso : null;
 };

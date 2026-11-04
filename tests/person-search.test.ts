@@ -146,7 +146,7 @@ const PAGES: Array<{ url: string; title: string; body: string; published: string
   { url: "https://lisbon.example.pt/artes/delgado", title: "Pintora Maria Delgado", published: "2012-02-02", body: "Maria Delgado (born 1951) is a painter from Lisbon. In 1975 Maria Delgado held her first exhibition." },
   { url: "https://blog.example.net/undated", title: "Notes", published: null, body: "Yesterday I read about Maria Delgado and robotics." },
   { url: "https://en.wikipedia.org/wiki/Maria_Delgado", title: "Maria Delgado - Wikipedia", published: "2020-01-01", body: "Maria Delgado (born June 12, 1984) is an engineer." },
-  { url: "https://epoch.example.org/p", title: "Epoch", published: "1970-01-01T02:00:00+02:00", body: "Maria Delgado spoke at the meetup." },
+  { url: "https://epoch.example.org/p", title: "Epoch", published: "1970-01-01T00:00:00+05:30", body: "Maria Delgado spoke at the meetup." },
   { url: "https://noise.example.com/scatter", title: "Maria and friends", published: "2015-01-01", body: "Maria went to the market. Later, Delgado Street was closed." },
 ];
 
