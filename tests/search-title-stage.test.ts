@@ -28,14 +28,14 @@ suite("search: title stage [postgres]", () => {
       await store.saveSnapshot(row.id, record(url, title, body), { text: body, changedFields: null, index: true });
       await store.finish(row.id, "indexed", now + 86_400_000, { indexed_at: new Date(now).toISOString(), title });
     }
-    await store.ensureTitleIndex();
+    await store.backfillTitles();
   }, 120_000);
   afterAll(async () => {
     await store?.close();
     await pgBackend?.dispose();
   });
-  it("builds the title index concurrently and marks it ready", () => {
-    expect(store.titleIndexReady).toBe(true);
+  it("backfills title vectors and marks them ready", () => {
+    expect(store.titlesReady).toBe(true);
   });
   it("answers from title matches when there are enough, ranked the same way", async () => {
     const r = await store.searchResources({ terms: ["river"], limit: 10, offset: 0 });

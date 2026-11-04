@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
   ) STORED
 );
 CREATE INDEX IF NOT EXISTS idx_docs_tsv ON corpus_docs USING GIN (tsv);
+-- Title vectors in their own small table: a common word matches far fewer titles than bodies, so they rank fast.
+-- The index is created with the (empty) table: no concurrent index build is ever needed.
+CREATE TABLE IF NOT EXISTS corpus_titles (resource_id BIGINT PRIMARY KEY REFERENCES resources(id) ON DELETE CASCADE, tsv tsvector NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_titles_tsv ON corpus_titles USING GIN (tsv);
 ALTER TABLE corpus_docs ADD COLUMN IF NOT EXISTS rank_tsv tsvector;
 ${LIFECYCLE_COLUMNS.map(([c, def]) => `ALTER TABLE resources ADD COLUMN IF NOT EXISTS ${c} ${def};`).join("\n")}
 CREATE INDEX IF NOT EXISTS idx_res_lifecycle ON resources (lifecycle);
@@ -169,8 +173,27 @@ export class PgCorpus implements Corpus {
       const client = await pool.connect();
       try {
         await client.query("SELECT pg_advisory_lock(424242)");
-        await client.query(SCHEMA);
         await client.query(`CREATE TABLE IF NOT EXISTS data_migrations (id TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)`);
+        // The schema DDL takes exclusive table locks. Run it only when its text changed (recorded by hash):
+        // a restart then never competes with another replica's writes. When it must run, a deadlock or lock
+        // timeout against another replica's background work is retried instead of failing startup.
+        const schemaId = "schema:" + createHash("sha256").update(SCHEMA).digest("hex").slice(0, 16);
+        const applied = (await client.query(`SELECT 1 FROM data_migrations WHERE id = $1`, [schemaId])).rowCount === 1;
+        if (!applied) {
+          await client.query(`SET lock_timeout = '10s'`);
+          for (let attempt = 1; ; attempt++) {
+            try {
+              await client.query(SCHEMA);
+              break;
+            } catch (err) {
+              const code = (err as { code?: string }).code;
+              if ((code !== "40P01" && code !== "55P03") || attempt >= 8) throw err;
+              await new Promise((resolve) => setTimeout(resolve, 250 * attempt + Math.floor(Math.random() * 250)));
+            }
+          }
+          await client.query(`RESET lock_timeout`);
+          await client.query(`INSERT INTO data_migrations (id, applied_at) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [schemaId, Date.now()]);
+        }
         const fresh = await client.query(`INSERT INTO data_migrations (id, applied_at) VALUES ('content-text-v1', $1) ON CONFLICT (id) DO NOTHING RETURNING id`, [Date.now()]);
         if (fresh.rowCount) await client.query(`UPDATE resources SET due_at = $1 + (id % 1440) * 60000 WHERE state = 'indexed' AND kind = 'webpage' AND duplicate_of IS NULL`, [Date.now()]);
         // "lifecycle-v1": columns are added above; existing rows get their lifecycle from the legacy state in
@@ -181,35 +204,53 @@ export class PgCorpus implements Corpus {
         client.release();
       }
     }
-    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.ensureTitleIndex()).then(() => c.backfill());
-    else void c.checkTitleIndex();
+    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.backfillTitles()).then(() => c.backfill());
+    void c.checkTitlesReady();
+    // Whichever process completes the backfill, every process notices.
+    const recheck = setInterval(() => {
+      if (c.titlesReady) return clearInterval(recheck);
+      void c.checkTitlesReady();
+    }, Number(process.env.TITLE_INDEX_RECHECK_MS ?? 120_000));
+    recheck.unref();
     return c;
   }
 
-  /** True once the title full-text index exists and is valid; searches then rank title matches first. */
-  titleIndexReady = false;
-  async checkTitleIndex(): Promise<boolean> {
+  /** True once every indexed document has a title vector ("title-vectors-v1" recorded); searches then rank title matches first. */
+  titlesReady = false;
+  async checkTitlesReady(): Promise<boolean> {
     try {
-      const r = await this.q<{ valid: boolean }>(`SELECT i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_docs_title_tsv'`);
-      this.titleIndexReady = r.rows[0]?.valid === true;
+      this.titlesReady = (await this.q(`SELECT 1 FROM data_migrations WHERE id = 'title-vectors-v1'`)).rowCount === 1;
     } catch {
-      this.titleIndexReady = false;
+      this.titlesReady = false;
     }
-    return this.titleIndexReady;
+    return this.titlesReady;
   }
-  /** Builds the title index without blocking writes (CONCURRENTLY); an invalid leftover from an interrupted build is replaced. */
-  async ensureTitleIndex(): Promise<void> {
+  /** Copies title vectors for documents indexed before corpus_titles existed: id order, 2000 at a time, resumable. */
+  async backfillTitles(batch = 2000): Promise<number> {
+    let total = 0;
     try {
-      const r = await this.q<{ valid: boolean }>(`SELECT i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_docs_title_tsv'`);
-      if (r.rows[0] && !r.rows[0].valid) await this.q(`DROP INDEX CONCURRENTLY IF EXISTS idx_docs_title_tsv`);
-      if (!r.rows[0]?.valid) {
-        await this.q(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_docs_title_tsv ON corpus_docs USING GIN (${TITLE_TSV})`);
-        await this.event(null, "title_index_built", "idx_docs_title_tsv");
+      if (await this.checkTitlesReady()) return 0;
+      let after = Number((await this.q<{ m: string | null }>(`SELECT MAX(resource_id) m FROM corpus_titles`)).rows[0].m ?? 0);
+      for (;;) {
+        const r = await this.q<{ m: string | null; n: string }>(
+          `WITH b AS (SELECT resource_id, title FROM corpus_docs WHERE resource_id > $1 ORDER BY resource_id LIMIT $2),
+                ins AS (INSERT INTO corpus_titles (resource_id, tsv) SELECT resource_id, ${TITLE_TSV} FROM b ON CONFLICT (resource_id) DO NOTHING)
+           SELECT MAX(resource_id) m, COUNT(*) n FROM b`,
+          [after, batch],
+        );
+        const n = Number(r.rows[0].n);
+        if (!n) break;
+        total += n;
+        after = Number(r.rows[0].m);
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
+      await this.q(`INSERT INTO data_migrations (id, applied_at) VALUES ('title-vectors-v1', $1) ON CONFLICT (id) DO NOTHING`, [Date.now()]);
+      this.titlesReady = true;
+      await this.event(null, "title_vectors_backfilled", `${total} documents`);
     } catch (err) {
-      await this.event(null, "title_index_failed", (err as Error).message.slice(0, 200)).catch(() => undefined);
+      await this.event(null, "title_vectors_backfill_failed", (err as Error).message.slice(0, 200)).catch(() => undefined);
     }
-    await this.checkTitleIndex();
+    return total;
   }
 
   /** Fills rank_tsv for pages indexed before it existed, 500 at a time, without blocking writers or other replicas. */
@@ -539,7 +580,11 @@ export class PgCorpus implements Corpus {
           [resourceId, redactSecrets(record.title ?? "").text, redactSecrets(record.description ?? "").text, redactSecrets(metaText(record)).text, redactForIndex(opts.text, TEXT_EXCERPT).replace(/\u0000/g, ""), record.finalUrl],
         );
         await client.query(`UPDATE corpus_docs SET rank_tsv = ${RANK_TSV} WHERE resource_id = $1`, [resourceId]);
-      } else await client.query(`DELETE FROM corpus_docs WHERE resource_id = $1`, [resourceId]);
+        await client.query(`INSERT INTO corpus_titles (resource_id, tsv) SELECT resource_id, ${TITLE_TSV} FROM corpus_docs WHERE resource_id = $1 ON CONFLICT (resource_id) DO UPDATE SET tsv = EXCLUDED.tsv`, [resourceId]);
+      } else {
+        await client.query(`DELETE FROM corpus_docs WHERE resource_id = $1`, [resourceId]);
+        await client.query(`DELETE FROM corpus_titles WHERE resource_id = $1`, [resourceId]);
+      }
       await client.query("COMMIT");
       return sid;
     } catch (err) {
@@ -709,7 +754,7 @@ export class PgCorpus implements Corpus {
     const where = filters.join(" AND ");
     const run = async (tsq: string, limit: number, offset: number, titleOnly = false) => {
       const n = extra.length + 1;
-      const match = titleOnly ? `${TITLE_TSV.replace("coalesce(title", "coalesce(d.title")} @@ query` : "d.tsv @@ query";
+      const match = titleOnly ? "EXISTS (SELECT 1 FROM corpus_titles t WHERE t.resource_id = d.resource_id AND t.tsv @@ query)" : "d.tsv @@ query";
       const res = await this.q(
         `WITH hits AS (
            SELECT d.resource_id, ts_rank(COALESCE(d.rank_tsv, d.tsv), query, 1) AS rank, query
@@ -727,14 +772,13 @@ export class PgCorpus implements Corpus {
     const t0 = Date.now();
     // Stage 1: pages whose titles contain every term (indexed, few) are ranked first. Ranking every body
     // match of a common word reads tens of thousands of vectors (12-24 s cold in production).
-    let all = this.titleIndexReady ? await run(andQ, q.limit, q.offset, true) : [];
+    let all = this.titlesReady ? await run(andQ, q.limit, q.offset, true) : [];
     const stage = all.length >= q.limit ? "title" : "full";
     if (all.length < q.limit) all = await run(andQ, q.limit, q.offset);
     const t1 = Date.now();
     // Counting body matches of a very common word scans like the ranking does (11 s for "history" in
     // production). When titles answered, count title matches instead and report the total as a lower bound.
-    const countMatch = stage === "title" ? `${TITLE_TSV.replace("coalesce(title", "coalesce(d.title")} @@ to_tsquery('english', $1)` : "d.tsv @@ to_tsquery('english', $1)";
-    const total = Number((await this.q<{ n: string }>(`SELECT COUNT(*) n FROM (SELECT 1 FROM corpus_docs d WHERE ${countMatch} LIMIT 1000) s`, [andQ])).rows[0].n);
+    const total = Number((await this.q<{ n: string }>(stage === "title" ? `SELECT COUNT(*) n FROM (SELECT 1 FROM corpus_titles t WHERE t.tsv @@ to_tsquery('english', $1) LIMIT 1000) s` : `SELECT COUNT(*) n FROM (SELECT 1 FROM corpus_docs d WHERE d.tsv @@ to_tsquery('english', $1) LIMIT 1000) s`, [andQ])).rows[0].n);
     const ms = { ranked: t1 - t0, count: Date.now() - t1, titleStage: stage === "title" ? 1 : 0 };
     if (all.length >= q.limit || q.terms.length < 2) return { rows: all, total, totalIsLowerBound: total >= 1000 || stage === "title", ms };
     const seen = new Set(all.map((r) => r.id));
