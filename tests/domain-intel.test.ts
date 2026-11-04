@@ -239,6 +239,11 @@ describe("domain intelligence — HTTP API", () => {
     let limited = 0;
     for (let i = 0; i < 25; i++) if ((await app.inject({ url: `/api/v2/domain-intel?domain=n${i}-fixture.com&fresh=1` })).statusCode === 429) limited++;
     expect(limited).toBeGreaterThan(0);
+    // A relayed visitor (Void forwards an opaque key) has its own bucket; a malformed key does not.
+    const other = await app.inject({ url: "/api/v2/domain-intel?domain=other-fixture.com&fresh=1", headers: { "x-void-client": "a".repeat(32) } });
+    expect(other.statusCode).toBe(200);
+    const bad = await app.inject({ url: "/api/v2/domain-intel?domain=other2-fixture.com&fresh=1", headers: { "x-void-client": "not-a-key" } });
+    expect(bad.statusCode).toBe(429);
     await app.close();
   }, 30_000);
 });

@@ -61,7 +61,11 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
       reply.header("x-domain-intel-cache", "hit");
       return hit.report;
     }
-    const client = req.ip;
+    // Void relays every visitor from one server address, so it forwards an opaque per-visitor key
+    // (a salted hash, never the address). Spoofing it only moves a caller into another bucket:
+    // the global concurrency cap below is the protection, this limit is fairness.
+    const relayKey = String(req.headers["x-void-client"] ?? "");
+    const client = /^[a-f0-9]{16,64}$/.test(relayKey) ? `${req.ip}|${relayKey}` : req.ip;
     const times = (perClient.get(client) ?? []).filter((t) => Date.now() - t < 3_600_000);
     if (times.length >= PER_HOUR) return reply.code(429).header("retry-after", "600").send({ error: "RATE_LIMITED", message: `At most ${PER_HOUR} domain runs per hour per client.` });
     if (running >= MAX_RUNNING) return reply.code(503).header("retry-after", "20").send({ error: "BUSY", message: "Other domain runs are in progress. Try again in a few seconds." });
