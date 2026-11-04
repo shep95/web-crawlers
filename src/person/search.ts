@@ -3,7 +3,7 @@
  * events, ordered as a timeline (by when each page was published, or by when the events it describes happened),
  * and grouped so namesakes with different stated birth years are told apart.
  */
-import type { Corpus, SearchCandidate } from "../corpus/types.js";
+import type { Corpus, SearchCandidate, StoredText } from "../corpus/types.js";
 import { fold, parsePersonQuery, type PersonQuery } from "./parse.js";
 import { birthAgreement, dateKey, isoOf, maskContacts, nameMatcher, readPage, type BirthFact, type PersonEvent } from "./extract.js";
 
@@ -66,9 +66,13 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
   // Candidates: pages with every word of the name; then the same with the location words, merged.
   const cand = new Map<number, SearchCandidate>();
   let indexTotal = 0, lowerBound = false;
+  const errors: string[] = [];
   const pull = async (words: string[], pages: number) => {
     for (let p = 0; p < pages && cand.size < PERSON_LIMITS.candidatePages; p++) {
-      const r = await store.searchResources({ terms: words, limit: 100, offset: p * 100 }).catch(() => ({ rows: [] as SearchCandidate[], total: 0, totalIsLowerBound: false }));
+      const r = await store.searchResources({ terms: words, limit: 100, offset: p * 100 }).catch((e: Error) => {
+        errors.push(`index search (${words.join(" ")}, page ${p + 1}): ${String(e?.message ?? e).slice(0, 160)}`);
+        return { rows: [] as SearchCandidate[], total: 0, totalIsLowerBound: false };
+      });
       if (words === nameTerms && p === 0) { indexTotal = r.total; lowerBound = !!r.totalIsLowerBound; }
       for (const row of r.rows) if (!row.duplicate_of && !cand.has(row.id)) cand.set(row.id, row);
       if (r.rows.length < 100 || Date.now() - t0 > PERSON_LIMITS.budgetMs / 2) break;
@@ -84,7 +88,10 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
   let read = 0, truncated = false;
   for (let i = 0; i < ids.length; i += PERSON_LIMITS.readBatch) {
     if (Date.now() - t0 > PERSON_LIMITS.budgetMs) { truncated = true; break; }
-    const texts = await store.documentTexts(ids.slice(i, i + PERSON_LIMITS.readBatch));
+    const texts = await store.documentTexts(ids.slice(i, i + PERSON_LIMITS.readBatch)).catch((e: Error) => {
+      errors.push(`stored text (${ids.length} pages from ${i}): ${String(e?.message ?? e).slice(0, 160)}`);
+      return new Map<number, StoredText>();
+    });
     for (const [id, doc] of texts) {
       read++;
       const row = cand.get(id)!;
@@ -176,7 +183,7 @@ export async function personSearch(store: Corpus, query: string | PersonQuery, o
     timeline,
     pagesTimeline,
     coverage: {
-      indexPagesWithNameWords: indexTotal, indexTotalIsLowerBound: lowerBound, candidatesRead: read, candidates: cand.size, truncated,
+      indexPagesWithNameWords: indexTotal, indexTotalIsLowerBound: lowerBound, candidatesRead: read, candidates: cand.size, truncated, errors,
       note: "Searches the pages Void's crawlers have collected. Pages are matched on the whole name as written (first and last name, with a middle name or initial allowed), not on scattered words.",
     },
     privacy: "Only public pages already in the index. Email addresses, phone numbers, street addresses and ID numbers are hidden in everything shown.",

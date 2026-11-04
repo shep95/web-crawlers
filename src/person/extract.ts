@@ -178,19 +178,19 @@ export function readPage(doc: { title: string; description: string; body: string
   const inTitle = re.test(titleFolded);
   re.lastIndex = 0;
 
-  const sentences: Array<{ a: number; b: number; via: PersonEvent["via"] }> = [];
+  const sentences: Array<{ a: number; b: number; via: PersonEvent["via"]; at: number }> = [];
   const seen = new Set<string>();
   for (const [s, e] of spans) {
     const [a, b] = sentenceAround(text, s, e);
     const k = `${a}:${b}`;
     if (seen.has(k)) continue;
     seen.add(k);
-    sentences.push({ a, b, via: "name" });
+    sentences.push({ a, b, via: "name", at: s });
     // One following sentence that continues with a pronoun is about the same person.
     const [na, nb] = sentenceAround(text, Math.min(text.length, b + 1), Math.min(text.length, b + 2));
     if (na >= b && nb > na && PRONOUN_START.test(text.slice(na, nb)) && !seen.has(`${na}:${nb}`)) {
       seen.add(`${na}:${nb}`);
-      sentences.push({ a: na, b: nb, via: "following" });
+      sentences.push({ a: na, b: nb, via: "following", at: na });
     }
   }
 
@@ -208,7 +208,7 @@ export function readPage(doc: { title: string; description: string; body: string
       const [a, b] = sentenceAround(text, at, at + m[0].length);
       if (seen.has(`${a}:${b}`) || sentences.some((x) => a < x.b && b > x.a)) continue;
       seen.add(`${a}:${b}`);
-      sentences.push({ a, b, via: "surname" });
+      sentences.push({ a, b, via: "surname", at });
       n++;
     }
   }
@@ -222,7 +222,9 @@ export function readPage(doc: { title: string; description: string; body: string
   for (const s of sentences.slice(0, 200)) {
     const raw = text.slice(s.a, s.b).replace(/\s+/g, " ").trim();
     if (!raw) continue;
-    const clean = maskContacts(raw.length > 420 ? raw.slice(0, 417) + "…" : raw);
+    // Long "sentences" (PDF text without punctuation) are shown as a window around the name.
+    const nameAt = Math.max(0, text.slice(s.a, s.at).replace(/\s+/g, " ").trimStart().length);
+    const clean = maskContacts(clip(raw, nameAt));
     masked += clean.masked;
     if (s.via === "name" && out.length < 40) out.push(clean.text);
     for (const r of raw.matchAll(ROLE_RE)) if (roles.size < 8) roles.add(r[1].toLowerCase().trim());
@@ -255,7 +257,8 @@ export function readPage(doc: { title: string; description: string; body: string
       events.push({
         date: { iso: isoOf(d), y: d.y, ...(d.m ? { m: d.m } : {}), ...(d.d ? { d: d.d } : {}), precision: d.precision, text: d.text, ...(d.ambiguous ? { ambiguous: true } : {}) },
         kind: lifeAt >= 0 && d.index >= lifeAt && d.end <= lifeAt + life![0].length ? (d.y === +life![1] ? "birth" : "death") : bornAt >= 0 && Math.abs(d.index - bornAt) < 60 ? "birth" : kind,
-        text: clean.text,
+        // Each event's text is a window around its date (and the name, when they are close).
+        text: raw.length <= CLIP ? clean.text : maskContacts(clip(raw, Math.abs(d.index - nameAt) < CLIP - 80 ? Math.min(d.index, nameAt) : d.index)).text,
         via: s.via,
         sortKey: dateKey(d),
       });
@@ -265,6 +268,17 @@ export function readPage(doc: { title: string; description: string; body: string
   const matched: string[] = [], missing: string[] = [];
   for (const part of q.locationParts) (new RegExp(`(?<!${L})${esc(part)}(?!${L})`, "u").test(folded) ? matched : missing).push(part);
   return { mentions: spans.length, inTitle, sentences: out, events: dedupeEvents(events), birth, death, location: { matched, missing }, roles: [...roles], masked };
+}
+
+const CLIP = 420;
+/** At most CLIP characters of text, starting a little before `at`, with ellipses where cut. */
+export function clip(text: string, at: number): string {
+  if (text.length <= CLIP) return text;
+  let a = Math.max(0, Math.min(at - 120, text.length - CLIP));
+  if (a > 0) { const sp = text.indexOf(" ", a); if (sp > 0 && sp - a < 20) a = sp + 1; }
+  let b = Math.min(text.length, a + CLIP);
+  if (b < text.length) { const sp = text.lastIndexOf(" ", b); if (sp > a + CLIP - 30) b = sp; }
+  return (a > 0 ? "…" : "") + text.slice(a, b) + (b < text.length ? "…" : "");
 }
 
 function dedupeEvents(events: PersonEvent[]): PersonEvent[] {

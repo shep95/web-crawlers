@@ -103,6 +103,17 @@ describe("person page reading", () => {
     const none = readPage({ title: "", description: "", body: "Delgado retired in 2022." }, q, re, 2023);
     expect(none.events).toEqual([]);
   });
+  it("shows long unpunctuated text as a window around the name and around each date", () => {
+    const filler = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(" ");
+    const body = `${filler(150)} the 2011 report thanks Maria Delgado for her review of chapter four ${filler(55)} published in 1999 ${filler(40)}`;
+    const r = readPage({ title: "", description: "", body }, q, re, 2012);
+    expect(r.sentences[0]).toContain("Maria Delgado");
+    expect(r.sentences[0].length).toBeLessThanOrEqual(422);
+    expect(r.sentences[0].startsWith("…")).toBe(true);
+    const e1999 = r.events.find((e) => e.date.iso === "1999")!;
+    expect(e1999.text).toContain("1999");
+    expect(r.events.find((e) => e.date.iso === "2011")!.text).toContain("Maria Delgado");
+  });
   it("masks phone numbers but not year ranges", () => {
     expect(maskContacts("Call +1 512 555 0199 today").text).toBe("Call [phone hidden] today");
     expect(maskContacts("Served 1998-2004 as mayor").text).toBe("Served 1998-2004 as mayor");
