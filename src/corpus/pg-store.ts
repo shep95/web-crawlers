@@ -204,7 +204,7 @@ export class PgCorpus implements Corpus {
         client.release();
       }
     }
-    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.backfillTitles()).then(() => c.backfill());
+    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.backfillTitles()).then(() => c.backfill()).then(() => c.pruneSnapshotHistory());
     void c.checkTitlesReady();
     // Whichever process completes the backfill, every process notices.
     const recheck = setInterval(() => {
@@ -213,6 +213,43 @@ export class PgCorpus implements Corpus {
     }, Number(process.env.TITLE_INDEX_RECHECK_MS ?? 120_000));
     recheck.unref();
     return c;
+  }
+
+  /**
+   * Deletes snapshots older than each page's newest ones (with their observations, by cascade), walking the
+   * snapshot ids in ranges so each batch is small and the crawler and search keep running. One process at a
+   * time (advisory lock); resumable; recorded as "snapshot-history-v1" when a full pass finishes. Freed space
+   * is reused by new rows (Postgres does not shrink files without VACUUM FULL).
+   */
+  async pruneSnapshotHistory(range = 2_000): Promise<number> {
+    const keep = SYSTEM_RETENTION.snapshotsPerResource;
+    const client = await this.pool.connect();
+    let deleted = 0;
+    try {
+      if (!(await client.query<{ ok: boolean }>(`SELECT pg_try_advisory_lock(424243) AS ok`)).rows[0].ok) return 0;
+      try {
+        const max = Number((await client.query<{ m: string | null }>(`SELECT MAX(id) m FROM snapshots`)).rows[0].m ?? 0);
+        for (let from = 0; from < max; from += range) {
+          const r = await client.query(
+            `DELETE FROM snapshots s WHERE s.id > $1 AND s.id <= $2
+               AND (SELECT COUNT(*) FROM snapshots n WHERE n.resource_id = s.resource_id AND n.id > s.id) >= $3`,
+            [from, from + range, keep],
+          );
+          deleted += r.rowCount ?? 0;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+        await client.query(`UPDATE resources r SET snapshot_count = LEAST(r.snapshot_count, $1) WHERE r.snapshot_count > $1`, [keep]);
+        await client.query(`INSERT INTO data_migrations (id, applied_at) VALUES ('snapshot-history-v1', $1) ON CONFLICT (id) DO UPDATE SET applied_at = EXCLUDED.applied_at`, [Date.now()]);
+        await this.event(null, "snapshot_history_pruned", `${deleted} older snapshots removed (keeping ${keep} per page)`);
+      } finally {
+        await client.query(`SELECT pg_advisory_unlock(424243)`).catch(() => undefined);
+      }
+    } catch (err) {
+      await this.event(null, "snapshot_history_prune_failed", (err as Error).message.slice(0, 200)).catch(() => undefined);
+    } finally {
+      client.release();
+    }
+    return deleted;
   }
 
   /** True once every indexed document has a title vector ("title-vectors-v1" recorded); searches then rank title matches first. */

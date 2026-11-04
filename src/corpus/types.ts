@@ -129,7 +129,8 @@ export interface LinkedResource {
 
 /** System retention rules (category 40 records these separately from source-declared policies). */
 export const SYSTEM_RETENTION = {
-  snapshotsPerResource: Number(process.env.SNAPSHOTS_PER_RESOURCE ?? 5),
+  // Only the latest snapshot is kept (change detection reads the previous one before it is replaced).
+  snapshotsPerResource: Math.max(1, Number(process.env.SNAPSHOTS_PER_RESOURCE ?? 1)),
   eventsDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
   transitionsDays: Number(process.env.TRANSITION_RETENTION_DAYS ?? 90),
   rawBodies: "not stored — only extracted metadata and a capped text excerpt (≤ 100 KB) for search",

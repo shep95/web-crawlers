@@ -259,7 +259,8 @@ for (const makeBackend of backends()) {
       clock += 8 * 86400_000;
       await mk().drain(300);
       const ds = (await url("/datasets/rainfall"))!;
-      expect(ds.snapshot_count).toBe(2);
+      // Only the latest snapshot is kept; the change is still detected against the previous one before it is replaced.
+      expect(ds.snapshot_count).toBe(1);
       expect(ds.change_count).toBe(1);
       const change = (await obs("/datasets/rainfall", "changedSinceLastSnapshot"))[0];
       expect((change.value as { fields: string[] }).fields).toEqual(expect.arrayContaining(["11.version"]));
