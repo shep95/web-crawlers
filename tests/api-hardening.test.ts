@@ -35,4 +35,8 @@ describe("API hardening (own-deployment findings)", () => {
       expect(r.statusCode, u).toBe(404);
     }
   });
+  it("UI pages forbid plugins explicitly (object-src 'none')", async () => {
+    const r = await app.inject({ url: "/", headers: { accept: "text/html" } });
+    if (r.statusCode === 200 && String(r.headers["content-type"]).includes("text/html")) expect(String(r.headers["content-security-policy"])).toMatch(/object-src 'none'/);
+  });
 });
