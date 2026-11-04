@@ -129,6 +129,8 @@ CREATE INDEX IF NOT EXISTS idx_rescov_cat ON resource_coverage (category, state)
 // Ranking reads a compact vector (title, description, URL, first 1,500 characters) instead of the full-text one:
 // common words match thousands of pages, and reading every full vector made a cold "climate change" take ~10 s.
 // Matching still uses the full vector through its GIN index.
+/** Title vector: far fewer matches than the body, so they can be ranked fast. */
+const TITLE_TSV = `to_tsvector('english', coalesce(title, ''))`;
 const RANK_TSV = `setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
   setweight(to_tsvector('english', coalesce(left(description, 600), '')), 'B') ||
   setweight(to_tsvector('simple', coalesce(url, '')), 'C') ||
@@ -179,8 +181,35 @@ export class PgCorpus implements Corpus {
         client.release();
       }
     }
-    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.backfill());
+    if (opts.migrate !== false) void c.backfillRankVectors().then(() => c.ensureTitleIndex()).then(() => c.backfill());
+    else void c.checkTitleIndex();
     return c;
+  }
+
+  /** True once the title full-text index exists and is valid; searches then rank title matches first. */
+  titleIndexReady = false;
+  async checkTitleIndex(): Promise<boolean> {
+    try {
+      const r = await this.q<{ valid: boolean }>(`SELECT i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_docs_title_tsv'`);
+      this.titleIndexReady = r.rows[0]?.valid === true;
+    } catch {
+      this.titleIndexReady = false;
+    }
+    return this.titleIndexReady;
+  }
+  /** Builds the title index without blocking writes (CONCURRENTLY); an invalid leftover from an interrupted build is replaced. */
+  async ensureTitleIndex(): Promise<void> {
+    try {
+      const r = await this.q<{ valid: boolean }>(`SELECT i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_docs_title_tsv'`);
+      if (r.rows[0] && !r.rows[0].valid) await this.q(`DROP INDEX CONCURRENTLY IF EXISTS idx_docs_title_tsv`);
+      if (!r.rows[0]?.valid) {
+        await this.q(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_docs_title_tsv ON corpus_docs USING GIN (${TITLE_TSV})`);
+        await this.event(null, "title_index_built", "idx_docs_title_tsv");
+      }
+    } catch (err) {
+      await this.event(null, "title_index_failed", (err as Error).message.slice(0, 200)).catch(() => undefined);
+    }
+    await this.checkTitleIndex();
   }
 
   /** Fills rank_tsv for pages indexed before it existed, 500 at a time, without blocking writers or other replicas. */
@@ -678,13 +707,14 @@ export class PgCorpus implements Corpus {
     if (q.hosts?.length) (extra.push(q.hosts, q.hosts.map((h) => `%.${h}`)), filters.push(`(r.host = ANY($${extra.length}::text[]) OR r.host LIKE ANY($${extra.length + 1}::text[]))`));
     if (q.category) (extra.push(q.category), filters.push(`EXISTS (SELECT 1 FROM observations o WHERE o.resource_id = r.id AND o.category = $${extra.length + 1})`));
     const where = filters.join(" AND ");
-    const run = async (tsq: string, limit: number, offset: number) => {
+    const run = async (tsq: string, limit: number, offset: number, titleOnly = false) => {
       const n = extra.length + 1;
+      const match = titleOnly ? `${TITLE_TSV.replace("coalesce(title", "coalesce(d.title")} @@ query` : "d.tsv @@ query";
       const res = await this.q(
         `WITH hits AS (
            SELECT d.resource_id, ts_rank(COALESCE(d.rank_tsv, d.tsv), query, 1) AS rank, query
            FROM corpus_docs d JOIN resources r ON r.id = d.resource_id, to_tsquery('english', $1) query
-           WHERE d.tsv @@ query AND ${where} ORDER BY rank DESC LIMIT $${n + 1} OFFSET $${n + 2})
+           WHERE ${match} AND ${where} ORDER BY rank DESC LIMIT $${n + 1} OFFSET $${n + 2})
          SELECT r.*, hits.rank,
            COALESCE(NULLIF(ts_headline('english', left(d.body, 4000), hits.query, 'StartSel=«,StopSel=»,MaxWords=30,MinWords=12,MaxFragments=2,FragmentDelimiter= … '), left(d.body, 0)),
                     ts_headline('english', left(d.meta, 2000), hits.query, 'StartSel=«,StopSel=»,MaxWords=24,MinWords=8')) AS snippet
@@ -695,11 +725,18 @@ export class PgCorpus implements Corpus {
       return res.rows.map((r) => ({ ...toRow(r), rank: Number(r.rank), snippet: (r.snippet as string) || null }) as SearchCandidate);
     };
     const t0 = Date.now();
-    const all = await run(andQ, q.limit, q.offset);
+    // Stage 1: pages whose titles contain every term (indexed, few) are ranked first. Ranking every body
+    // match of a common word reads tens of thousands of vectors (12-24 s cold in production).
+    let all = this.titleIndexReady ? await run(andQ, q.limit, q.offset, true) : [];
+    const stage = all.length >= q.limit ? "title" : "full";
+    if (all.length < q.limit) all = await run(andQ, q.limit, q.offset);
     const t1 = Date.now();
-    const total = Number((await this.q<{ n: string }>(`SELECT COUNT(*) n FROM (SELECT 1 FROM corpus_docs d WHERE d.tsv @@ to_tsquery('english', $1) LIMIT 1000) s`, [andQ])).rows[0].n);
-    const ms = { ranked: t1 - t0, count: Date.now() - t1 };
-    if (all.length >= q.limit || q.terms.length < 2) return { rows: all, total, totalIsLowerBound: total >= 1000, ms };
+    // Counting body matches of a very common word scans like the ranking does (11 s for "history" in
+    // production). When titles answered, count title matches instead and report the total as a lower bound.
+    const countMatch = stage === "title" ? `${TITLE_TSV.replace("coalesce(title", "coalesce(d.title")} @@ to_tsquery('english', $1)` : "d.tsv @@ to_tsquery('english', $1)";
+    const total = Number((await this.q<{ n: string }>(`SELECT COUNT(*) n FROM (SELECT 1 FROM corpus_docs d WHERE ${countMatch} LIMIT 1000) s`, [andQ])).rows[0].n);
+    const ms = { ranked: t1 - t0, count: Date.now() - t1, titleStage: stage === "title" ? 1 : 0 };
+    if (all.length >= q.limit || q.terms.length < 2) return { rows: all, total, totalIsLowerBound: total >= 1000 || stage === "title", ms };
     const seen = new Set(all.map((r) => r.id));
     const any = (await run(orQ, q.limit * 2, 0)).filter((r) => !seen.has(r.id)).slice(0, q.limit - all.length);
     const minAll = all.length ? Math.min(...all.map((r) => r.rank)) : Infinity;
