@@ -139,3 +139,19 @@ describe("OCR language routing (multilingual models from npm, no network)", asyn
     expect(r.fields.find((f) => f.field === "ocrText")?.method).toBe("tesseract OCR (fra+eng)");
   }, 90_000);
 });
+
+describe("OCR model links", () => {
+  it("replaces a dangling model link left by another install instead of hanging", async () => {
+    const { combinedLangPath } = await import("../src/metadata/ocr-languages.js");
+    const { readlinkSync, rmSync, symlinkSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const dir = combinedLangPath();
+    const link = join(dir, "eng.traineddata.gz");
+    rmSync(link, { force: true });
+    symlinkSync("/nonexistent/old-install/eng.traineddata.gz", link);
+    expect(existsSync(link)).toBe(false);
+    combinedLangPath();
+    expect(existsSync(link)).toBe(true);
+    expect(readlinkSync(link)).toMatch(/@tesseract\.js-data\/eng\//);
+  });
+});

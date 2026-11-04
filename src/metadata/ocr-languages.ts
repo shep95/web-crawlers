@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -66,15 +66,23 @@ export function installedModels(): Map<string, string> {
 export function combinedLangPath(): string {
   const dir = join(tmpdir(), "omnispider-tessdata");
   mkdirSync(dir, { recursive: true });
-  const have = new Set(readdirSync(dir));
   for (const [code, src] of installedModels()) {
     const f = `${code}.traineddata.gz`;
-    if (!have.has(f)) {
-      try {
-        symlinkSync(join(src, f), join(dir, f));
-      } catch {
-        /* concurrent creation */
-      }
+    const link = join(dir, f), target = join(src, f);
+    // A link left by another install (moved or deleted node_modules) dangles: tesseract then waits forever
+    // for a model it cannot read. Keep a link only if it points at this install's model file.
+    let current: string | null = null;
+    try {
+      current = readlinkSync(link);
+    } catch {
+      /* missing, or a regular file */
+    }
+    if (current === target && existsSync(link)) continue;
+    try {
+      if (current !== null || existsSync(link)) rmSync(link, { force: true });
+      symlinkSync(target, link);
+    } catch {
+      /* concurrent creation by another worker */
     }
   }
   return dir;
