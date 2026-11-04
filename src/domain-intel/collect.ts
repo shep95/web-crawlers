@@ -149,7 +149,7 @@ export async function collectDomain(net: IntelNet, domain: string, opts: { autho
     net.dns(domain, "TXT"), net.dns(`_dmarc.${domain}`, "TXT"), net.dns(`_mta-sts.${domain}`, "TXT"), net.dns(`_smtp._tls.${domain}`, "TXT"),
     net.dns(`default._bimi.${domain}`, "TXT"), net.dns(domain, "DS"), net.dns(domain, "DNSKEY"), net.dns(probe, "A"), net.dns(domain, "MX"),
     net.json<Array<{ name_value: string; issuer_name: string; not_before: string; not_after: string }>>(`https://crt.sh/?q=${encodeURIComponent("%." + domain)}&output=json&exclude=expired&deduplicate=Y`, 20_000),
-    net.json<string[][]>(`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(domain + "/*")}&output=json&fl=original&collapse=urlkey&limit=3000`, 15_000),
+    net.json<string[][]>(`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(domain + "/*")}&output=json&fl=original&collapse=urlkey&limit=3000`, 30_000),
   ]);
   const failed = (r: DnsResult) => r.status === -1 || r.status === 2; // transport error or SERVFAIL
   for (const [name, r] of [["txt", txt], ["dmarc", dmarc], ["mta-sts", mtaSts], ["tls-rpt", tlsRpt], ["ds", ds], ["dnskey", dnskey], ["wildcard", wild], ["mx", mx]] as const) if (failed(r)) facts.unavailable.push(name);
