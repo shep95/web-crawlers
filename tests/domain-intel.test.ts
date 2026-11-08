@@ -84,7 +84,7 @@ function shopFixture(extra: { authorized?: boolean } = {}) {
       [`https://${D}/.git/HEAD`]: { status: 200, headers: { "content-type": "text/plain" }, body: "ref: refs/heads/main\n" },
       [`https://${D}/#cors`]: { status: 200, headers: { "content-type": "text/html", "access-control-allow-origin": "https://void-intel-origin-check.invalid", "access-control-allow-credentials": "true" }, body: "" },
     },
-    tls: { [D]: { cert: { subject: `CN=${D}`, issuer: "C=US, O=Let's Encrypt, CN=R11", validFrom: "2026-08-20T00:00:00Z", validTo: "2026-11-14T00:00:00Z", san: [D, `www.${D}`], serial: "01", fingerprint256: "AA", bits: 2048, selfSigned: false, chainDepth: 2 } } },
+    tls: { [D]: { cert: { subject: `CN=${D}`, issuer: "C=US, O=Let's Encrypt, CN=R11", validFrom: "2026-08-20T00:00:00Z", validTo: "2026-11-14T00:00:00Z", san: [D, `www.${D}`], serial: "01", fingerprint256: "AA", bits: 2048, keyType: "RSA", curve: null, selfSigned: false, chainDepth: 2 } } },
   });
 }
 
@@ -203,7 +203,7 @@ describe("domain intelligence — authorized run (owner-verified)", () => {
     const f = (re: RegExp) => r.findings.find((x) => re.test(x.title));
     expect(f(/\/\.git\/HEAD is publicly served/)).toMatchObject({ severity: "critical", state: "validated" });
     expect(f(/TLSv1\.0 is still accepted/)).toMatchObject({ state: "validated" });
-    expect(f(/CORS reflects arbitrary origins with credentials/)).toMatchObject({ severity: "high", state: "validated" });
+    expect(f(/CORS reflects arbitrary origins with credentials/)).toMatchObject({ severity: "info", state: "observed" });
     expect(f(/Port 6379 is reachable/)).toMatchObject({ severity: "high" });
     // Each address is probed once even when several hostnames share it.
     expect(net.calls.tcp.filter((c) => c === "203.0.113.10:6379")).toHaveLength(1);
@@ -281,7 +281,7 @@ describe("domain intelligence — regressions from the first live run", () => {
     const { createServer } = await import("node:net");
     const { __intelTesting } = await import("../src/domain-intel/net.js");
     __intelTesting.allowLoopback = true;
-    const srv = createServer((sock) => {
+    const srv = createServer((sock) => { sock.on("error", (error) => { if((error as NodeJS.ErrnoException).code!=="ECONNRESET")throw error; });
       let greeted = false;
       sock.write("220-mx.fixture ESMTP ready\r\n");
       setTimeout(() => { sock.write("220 mx.fixture ESMTP\r\n"); greeted = true; }, 60);
@@ -397,3 +397,32 @@ describe("domain intelligence — unbounded branching", () => {
   });
 });
 
+
+describe('private evidence access separation',()=>{
+ it('requires an operator key, separates caches and protects continuation',async()=>{
+  const app=Fastify(),net=shopFixture(),key='fixture-evidence-key-at-least-32-characters';
+  registerDomainIntelRoutes(app,{net,ownedRoots:[D],secret:'fixture',evidenceKey:key});await app.ready();
+  const request=`/api/v2/domain-intel?domain=${D}`;
+  const privateRun=await app.inject({url:request,headers:{'x-void-evidence-key':key}});
+  expect(privateRun.statusCode).toBe(200);expect(privateRun.json().pageEvidence.enabled).toBe(true);expect(privateRun.json().pageEvidence.records.length).toBeGreaterThan(0);
+  expect(privateRun.headers['cache-control']).toBe('no-store');
+  const publicRun=await app.inject({url:request});expect(publicRun.json().pageEvidence.enabled).toBe(false);expect(publicRun.json().pageEvidence.records).toEqual([]);
+  const denied=await app.inject({url:request,headers:{'x-void-evidence-key':'wrong'}});expect(denied.statusCode).toBe(403);
+  const cont=await app.inject({url:`/api/v2/domain-intel/continue?run=${privateRun.json().runId}`});expect(cont.statusCode).toBe(403);
+  await app.close();
+ });
+ it("requires both an audit key and authorized scope for live validation", async () => {
+  const app = Fastify();
+  const key = "fixture-key-not-production-0123456789";
+  registerDomainIntelRoutes(app, { net: fixtureNet({dns:{},http:{}}), ownedRoots: [], evidenceKey: key, secret: "fixture" });
+  try {
+   const url = "/api/v2/domain-intel?domain=" + D + "&validate=1";
+   expect((await app.inject({ url })).json().error).toBe("VALIDATION_KEY_REQUIRED");
+   const denied = await app.inject({ url, headers: { "x-void-evidence-key": key } });
+   expect(denied.statusCode).toBe(403);
+   expect(denied.json().error).toBe("VALIDATION_SCOPE_REQUIRED");
+   expect(denied.headers["cache-control"]).toBe("no-store");
+  } finally { await app.close(); }
+ });
+
+});

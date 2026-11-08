@@ -14,6 +14,7 @@ export interface SafeFetchOptions {
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;
+  followRedirects?: boolean;
   userAgent?: string;
   accept?: string;
   headers?: Record<string, string>;
@@ -207,7 +208,7 @@ export async function safeFetch(rawUrl: string, opts: SafeFetchOptions = {}): Pr
     const headers = headerRecord(res.headers as Record<string, string | string[]>);
     // Swallow the abort error that destroy() emits on purpose (see readCapped).
     res.body.on("error", noop);
-    if (res.statusCode >= 300 && res.statusCode < 400 && headers.location) {
+    if (opts.followRedirects !== false && res.statusCode >= 300 && res.statusCode < 400 && headers.location) {
       res.body.destroy();
       const next = new URL(headers.location, current).toString();
       redirects.push({ url: current, status: res.statusCode, location: next });

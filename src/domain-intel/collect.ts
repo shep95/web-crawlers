@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import { getDomain, getPublicSuffix, getSubdomain } from "tldts";
 import { createHash } from "node:crypto";
 import { detectSecrets, type SecretType } from "../text/secrets.js";
+import { isReadOnlyCandidate, redirectParam } from "./validation.js";
 import type { DnsResult, HttpResult, IntelNet, TcpResult, TlsResult } from "./net.js";
 
 /** Facts gathered for the registrable domain as a whole (registration, mail, history). */
@@ -488,17 +489,18 @@ export async function collectHost(
     // Only the status, size and whether a format signature matched are kept: contents are never stored or shown (00-04).
     f.exposures = ex.map((r, i) => ({ path: SENSITIVE_PATHS[i].path, status: r.status, signature: r.status === 200 && SENSITIVE_PATHS[i].signature.test(r.body) && !/<html/i.test(r.body.slice(0, 400)) ? "matched" : null, bytes: r.body.length }));
     const evil = "https://void-intel-origin-check.invalid";
-    const cors = await net.http(origin + "/", { headers: { origin: evil }, maxBytes: 4096 });
+    const cors = await net.http(origin + "/", { headers: { origin: evil }, maxBytes: 4096, follow: false });
     f.cors = { origin: evil, acao: cors.headers["access-control-allow-origin"] ?? null, credentials: /true/i.test(cors.headers["access-control-allow-credentials"] ?? ""), reflected: cors.headers["access-control-allow-origin"] === evil };
     const rp = f.page?.redirectParams[0];
     if (rp) {
       const u = new URL(rp, origin);
-      const key = [...u.searchParams.keys()].find((k) => /^(next|url|redirect|redirect_uri|return|returnTo|return_to|continue|dest|destination|goto|target)$/i.test(k));
-      if (key) {
-        u.searchParams.set(key, "https://example.org/void-intel");
+      const key = [...u.searchParams.keys()].find((k) => redirectParam.test(k));
+      if (key && u.origin === origin && isReadOnlyCandidate(u) && [...u.searchParams.keys()].length === 1) {
+        const marker = "https://void-intel-redirect.invalid/";
+        u.searchParams.set(key, marker);
         const r = await net.http(u.href, { follow: false, maxBytes: 4096 });
         const loc = r.headers.location ?? null;
-        f.openRedirect = { url: u.href, location: loc, external: !!loc && /^https?:\/\/example\.org/i.test(loc) };
+        f.openRedirect = { url: u.href, location: loc, external: [301, 302, 303, 307, 308].includes(r.status) && loc === marker };
       }
     }
     const target = f.addresses.find((a) => !a.includes(":"));
@@ -514,12 +516,14 @@ export async function collectHost(
   return f;
 }
 
-async function parsePage(net: IntelNet, html: string, base: URL, host: string, budget: () => boolean): Promise<PageFacts> {
+export async function parsePage(net: IntelNet, html: string, base: URL, host: string, budget: () => boolean): Promise<PageFacts> {
   const $ = cheerio.load(html);
+  let linkBase = base;
+  try { linkBase = new URL($("base[href]").first().attr("href") || base.href, base); } catch { /* Keep the response URL. */ }
   const abs = (u: string | undefined) => {
     if (!u) return null;
     try {
-      return new URL(u, base);
+      return new URL(u, linkBase);
     } catch {
       return null;
     }

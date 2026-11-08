@@ -1,3 +1,4 @@
+import {PageCrawler} from "./pages.js";
 import { createHmac } from "node:crypto";
 import { domainToASCII } from "node:url";
 import { getDomain, getPublicSuffix } from "tldts";
@@ -22,6 +23,7 @@ export interface IntelReport {
   scope: { mode: "passive" | "authorized"; reason: string; ownedRoots: string[]; verification: { record: string; value: string }; root: string; registrableDomain: string; platform: string | null };
   decision: Record<string, boolean>;
   nodes: IntelNode[]; edges: IntelEdge[]; hosts: HostFacts[]; domainFacts: DomainFacts;
+  pageEvidence?: ReturnType<PageCrawler["report"]> & {enabled:boolean};
   findings: Finding[]; rules: RuleDisposition[];
   coverage: { families: Array<{ id: string; name: string; triggered: number; clear: number; notObserved: number; notTested: number; total: number }>; totals: Record<RuleStatus, number>; dispositioned: number; total: number };
   workflow: WorkflowStep[]; unknowns: string[]; limits: string[];
@@ -67,7 +69,7 @@ export function scopeRootOf(host: string): string {
   return p && host !== reg && ["platform", "cdn", "cloud", "saas"].includes(p.kind) ? host : reg;
 }
 
-export interface RunOptions { net: IntelNet; ownedRoots: string[]; secret: string; now?: () => number; budgetMs?: number }
+export interface RunOptions { sensitive?: boolean; validate?: boolean; net: IntelNet; ownedRoots: string[]; secret: string; now?: () => number; budgetMs?: number }
 
 /** Common subdomain labels resolved through public DNS (wave 1). DNS answers only: nothing on the target is contacted for this. */
 const COMMON_LABELS = ["www", "mail", "webmail", "smtp", "imap", "pop", "mx", "ns1", "ns2", "api", "app", "apps", "dev", "staging", "stage", "test", "qa", "uat", "beta", "demo", "admin", "portal", "dashboard", "console", "vpn", "remote", "sso", "auth", "login", "id", "accounts", "cdn", "static", "assets", "img", "images", "media", "files", "docs", "help", "support", "status", "blog", "shop", "store", "pay", "billing", "git", "gitlab", "jenkins", "ci", "grafana", "kibana", "monitor", "intranet", "internal", "m", "mobile", "old", "legacy", "new", "v2", "beta2", "assets2", "autodiscover", "owa", "exchange"];
@@ -88,6 +90,7 @@ export class DomainRun {
   scope!: IntelReport["scope"]; authorized = false; private ownedRoots: string[] = [];
   domainFacts!: DomainFacts;
   hosts = new Map<string, HostFacts>(); edges: IntelEdge[] = []; private edgeKeys = new Set<string>();
+  readonly pageCrawler: PageCrawler;
   private queued = new Set<string>(); private queue: Q[] = []; private probedIps = new Set<string>();
   workflow: WorkflowStep[] = []; waves = 0; lastUsed = Date.now();
 
@@ -99,10 +102,11 @@ export class DomainRun {
     this.input = input; this.host = host;
     this.registrableDomain = registrable(host);
     this.domain = scopeRootOf(host);
+    this.pageCrawler = new PageCrawler(opts.net, h=>opts.sensitive===true&&this.authorized&&this.inScope(h)&&this.inOwned(h), (h,parent)=>this.enqueue(h,parent,"page traversal",1), this.now, opts.validate === true && opts.sensitive === true);
   }
   inScope = (h: string) => h === this.domain || h.endsWith("." + this.domain);
   private inOwned = (h: string) => this.ownedRoots.some((r) => h === r || h.endsWith("." + r));
-  get frontier() { return this.queue.length; }
+  get frontier() { return this.queue.length + this.pageCrawler.frontier; }
 
   private edge(from: string, to: string, kind: string) {
     const k = `${from}>${to}>${kind}`;
@@ -131,6 +135,7 @@ export class DomainRun {
     const proof = declared ? null : await net.dns(verification.record, "TXT");
     const proven = !!proof?.answers.some((a) => a.data.replace(/"/g, "") === verification.value);
     this.authorized = declared || proven;
+    if (this.opts.validate && (!this.authorized || !this.opts.sensitive)) throw new Error("VALIDATION_SCOPE_REQUIRED");
     this.ownedRoots = this.authorized ? (declared ? owned.filter((r) => host === r || host.endsWith("." + r)) : [this.domain]) : [];
     if (declared && this.ownedRoots[0] && this.ownedRoots[0].length > this.domain.length && this.ownedRoots[0].endsWith("." + this.domain)) this.domain = this.ownedRoots[0];
     const platform = this.domain !== this.registrableDomain ? attributeProvider(host) : null;
@@ -148,6 +153,8 @@ export class DomainRun {
     this.workflow.push({ id: "registration", label: "Registration, mail, DNSSEC, certificate logs, archives, lookalikes", family: "01", ms: this.now() - s, status: "done", detail: `${d.rdap ? `registrar ${d.rdap.registrar ?? "unknown"}` : "no RDAP"}; ${d.ct.names.length} names in CT; ${d.wayback.urls.length} archived URLs; ${d.lookalikes.filter((l) => l.resolves).length} lookalikes resolve` });
 
     // Seeds: the input, www, every certificate-log name, archived hostnames, SPF includes and resolvable common labels.
+    this.pageCrawler.enqueue(`https://${host}/`, null, "input");
+    for(const url of d.wayback.urls)this.pageCrawler.enqueue(url,null,"archive lead");
     this.queued.add(host);
     this.queue.push({ host, depth: 0, parent: null, via: "input", reference: false });
     const platformName = getPublicSuffix(this.domain, { allowPrivateDomains: true }) !== getPublicSuffix(this.domain);
@@ -179,6 +186,7 @@ export class DomainRun {
     this.waves++;
     let collected = 0, rounds = 0;
     while (this.queue.length && budget()) {
+      if(rounds>0 && deadline-this.now()<LIMITS.hostBudgetMs)break;
       rounds++;
       this.queue.sort((a, b) => Number(a.reference) - Number(b.reference) || a.depth - b.depth);
       const batch = this.queue.splice(0, 8);
@@ -187,6 +195,7 @@ export class DomainRun {
       const done = await Promise.all(batch.map((q) => { const until = this.now() + LIMITS.hostBudgetMs; return collectHost(net, q.host, { depth: q.depth, parent: q.parent, via: q.via, inScope: this.inScope(q.host), reference: q.reference, authorized: this.authorized && this.inOwned(q.host), budget: () => this.now() < until, probedIps: this.probedIps }); }));
       for (const f of done) { this.hosts.set(f.host, f); collected++; this.branch(f); }
     }
+    if(budget()) await this.pageCrawler.wave(Math.max(0,deadline-this.now()));
     this.workflow.push({ id: "wave-" + this.waves, label: `Wave ${this.waves}: collect and branch (DNS → network → TLS → HTTP → pages)`, family: "02–05", ms: this.now() - s, status: this.queue.length ? "partial" : "done", detail: `${collected} nodes collected in ${rounds} rounds; ${this.hosts.size} known; ${this.queue.length} still in the frontier` });
   }
 
@@ -202,6 +211,11 @@ export class DomainRun {
     for (const ip of f.ips) for (const p of ip.ptr) this.enqueue(p, f.host, "reverse DNS", at);
     const csp = f.https?.headers["content-security-policy"] ?? "";
     for (const m of csp.matchAll(/https?:\/\/([a-z0-9*.-]+\.[a-z]{2,})/gi)) this.enqueue(m[1], f.host, "CSP source", at);
+    this.pageCrawler.enqueue(`https://${f.host}/`,null,"discovered host");
+    this.pageCrawler.enqueue(`https://${f.host}/sitemap.xml`,null,"sitemap discovery");
+    for(const url of f.robots?.sitemaps||[])this.pageCrawler.enqueue(url,null,"robots sitemap");
+    for(const url of f.sitemap?.sample||[])this.pageCrawler.enqueue(url,null,"sitemap");
+    for(const url of f.page?.links||[])this.pageCrawler.enqueue(url,null,"host page");
     const p = f.page;
     if (p) {
       for (const l of p.links) { try { this.enqueue(new URL(l).hostname, f.host, "page link", at); } catch { /* ignore */ } }
@@ -219,7 +233,7 @@ export class DomainRun {
     const domainFacts = this.domainFacts;
     const hostList = [...this.hosts.values()];
     const edges = this.edges;
-    const skipped = this.queue.length;
+    const skipped = this.frontier;
     const findings = analyze(domainFacts, hostList, { authorized, host, domain, now: this.now() });
     const workflow = [...this.workflow, { id: "analyze", label: "Findings, causal chains and evidence states", family: "18", ms: 0, status: "done" as const, detail: `${findings.length} findings: ${(["critical", "high", "medium", "low", "info"] as Severity[]).map((s) => `${findings.filter((f) => f.severity === s).length} ${s}`).join(", ")}` }];
     const rules = disposition(domainFacts, hostList, findings, { authorized, host, domain, skipped });
@@ -270,8 +284,8 @@ export class DomainRun {
         publicIO: hostList.some((h) => !!h.page), dataEndpoints: hostList.some((h) => !!h.page && (h.page.forms.length > 0 || h.page.signals.apiCalls.length > 0 || h.page.fileRoutes.length > 0)),
         inputs: hostList.some((h) => !!h.page && (h.page.forms.length > 0 || h.page.paramLinks.length > 0)), hypotheses: findings.length > 0, childNode: hostList.length > 1 || skipped > 0, report: true,
       },
-      nodes, edges: [...edges, ...extraEdges], hosts: hostList, domainFacts, findings, rules, coverage, workflow, unknowns,
-      limits: [`no host, depth or reference limit: the run continues in waves of about ${Math.round((this.opts.budgetMs ?? LIMITS.budgetMs) / 1000)} s until the frontier is empty`, "references (other parties' hosts) are resolved and recorded, never expanded or tested", "pages: 768 KiB, first-party scripts: 4 × 1.5 MiB per page"],
+      nodes, edges: [...edges, ...extraEdges], hosts: hostList, domainFacts, pageEvidence:{enabled:this.opts.sensitive===true&&this.authorized,...this.pageCrawler.report()}, findings, rules, coverage, workflow, unknowns,
+      limits: [`no host, depth or reference limit: the run continues in waves of about ${Math.round((this.opts.budgetMs ?? LIMITS.budgetMs) / 1000)} s until the frontier is empty`, "references (other parties' hosts) are resolved and recorded, never expanded or tested", "host metadata: 768 KiB pages and 4 scripts; authorized page traversal separately records all discovered URLs and exact secret matches, up to 8 MiB per response with explicit truncation flags"],
     };
   }
 }
@@ -403,7 +417,7 @@ export function analyze(d: DomainFacts, hosts: HostFacts[], c: Ctx): Finding[] {
         const noSri = page.scripts.filter((s) => !s.firstParty && !s.integrity);
         if (noSri.length) add({ rule: "12-01", title: `${noSri.length} third-party scripts without Subresource Integrity`, severity: "low", state: "observed", asset: h.host, evidence: noSri.slice(0, 6).map((s) => s.src), why: "If the third party is compromised, its script runs with full access to this page.", next: "Decide which providers are trusted.", fix: "Pin static third-party scripts with integrity= hashes, or self-host them." });
         if (page.signals.sourceMaps.length) add({ rule: "05-09", title: "Public JavaScript references source maps", severity: "low", state: "hypothesized", asset: h.host, evidence: page.signals.sourceMaps.slice(0, 4), why: "Source maps can reveal original source, comments and internal paths. The map file itself was not downloaded (00-04).", next: "Owner: check whether the .map URLs are served.", fix: "Do not deploy source maps publicly, or restrict them." });
-        if (page.redirectParams.length) add({ rule: "04-09", title: h.openRedirect?.external ? "Open redirect confirmed" : "Redirect parameter in links", severity: h.openRedirect?.external ? "medium" : "info", state: h.openRedirect?.external ? "validated" : "hypothesized", asset: h.host, evidence: h.openRedirect ? [`${h.openRedirect.url} → Location ${h.openRedirect.location ?? "(none)"}`] : page.redirectParams.slice(0, 3), why: "Unchecked redirect targets let attackers send victims through a trusted URL to a malicious site, and can leak OAuth codes.", next: c.authorized ? "Validated above." : "Authorized test: set the parameter to an external URL and observe Location.", fix: "Allow only relative paths or an allow-list of hosts." });
+        if (page.redirectParams.length) add({ rule: "04-09", title: h.openRedirect?.external ? "External redirect observed" : "Redirect parameter in links", severity: "info", state: h.openRedirect?.external ? "observed" : "hypothesized", asset: h.host, evidence: h.openRedirect ? [`${h.openRedirect.url} → Location ${h.openRedirect.location ?? "(none)"}`] : page.redirectParams.slice(0, 3), why: "Unchecked redirect targets let attackers send victims through a trusted URL to a malicious site, and can leak OAuth codes.", next: "Use live validation to check whether two independent inputs control the destination.", fix: "Allow only relative paths or an allow-list of hosts." });
       }
       const server = hh.server ?? "", powered = hh["x-powered-by"] ?? "";
       const ver = [server, powered, hh["x-aspnet-version"] ?? "", hh["x-generator"] ?? ""].filter((v) => /\d+\.\d+/.test(v));
@@ -416,7 +430,7 @@ export function analyze(d: DomainFacts, hosts: HostFacts[], c: Ctx): Finding[] {
       if (hh["set-cookie"] && /public/i.test(hh["cache-control"] ?? "") && !/private|no-store/i.test(hh["cache-control"] ?? "")) add({ rule: "13-08", title: "Response sets cookies but is marked publicly cacheable", severity: "medium", state: "hypothesized", asset: h.host, evidence: [`Cache-Control: ${hh["cache-control"]}`, "Set-Cookie present"], why: "A shared cache could store one visitor's cookie or personalized page and serve it to others.", next: "Authorized test with two accounts through the CDN.", fix: "Mark personalized responses private/no-store; strip Set-Cookie on cacheable responses." });
       const acao = hh["access-control-allow-origin"];
       if (acao === "*" && /true/i.test(hh["access-control-allow-credentials"] ?? "")) add({ rule: "04-08", title: "CORS allows any origin with credentials", severity: "high", state: "observed", asset: h.host, evidence: ["Access-Control-Allow-Origin: *", "Access-Control-Allow-Credentials: true"], why: "Browsers reject this exact pair, but it signals a permissive CORS layer that may reflect origins elsewhere.", next: "Authorized test with an Origin header.", fix: "Allow-list origins explicitly." });
-      if (h.cors?.reflected) add({ rule: "04-08", title: `CORS reflects arbitrary origins${h.cors.credentials ? " with credentials" : ""}`, severity: h.cors.credentials ? "high" : "low", state: "validated", asset: h.host, evidence: [`Origin: ${h.cors.origin} → Access-Control-Allow-Origin: ${h.cors.acao}`, `credentials: ${h.cors.credentials}`], why: h.cors.credentials ? "Any website can read authenticated responses from this origin in a victim's browser." : "Any website can read public responses; harmless for public data.", next: "Check which endpoints return user data.", fix: "Allow-list exact origins; never reflect with credentials." });
+      if (h.cors?.reflected) add({ rule: "04-08", title: `CORS reflects arbitrary origins${h.cors.credentials ? " with credentials" : ""}`, severity: "info", state: "observed", asset: h.host, evidence: [`Origin: ${h.cors.origin} → Access-Control-Allow-Origin: ${h.cors.acao}`, `credentials: ${h.cors.credentials}`], why: h.cors.credentials ? "The header permits credentialed cross-origin reads; actual impact depends on protected responses, credentials and browser policy." : "Any website can read public responses; harmless for public data.", next: "Check which endpoints return user data.", fix: "Allow-list exact origins; never reflect with credentials." });
     }
     if (h.notFound?.leaks.length) add({ rule: "05-12", title: "Error page leaks internals", severity: "medium", state: "observed", asset: h.host, evidence: h.notFound.leaks, why: "Stack traces and debug pages reveal code paths, versions and configuration.", next: "Disable debug mode.", fix: "Serve generic error pages in production; log details server-side." });
     if (h.notFound?.soft404) add({ rule: "05-12", title: "Unknown paths return 200 (soft 404)", severity: "info", state: "observed", asset: h.host, evidence: ["random path answered 200"], why: "Monitoring and scanners cannot distinguish missing pages; usually an SPA fallback.", next: "—", fix: "Return 404 for unknown routes where possible." });

@@ -63,3 +63,10 @@ describe("safeFetch stream safety", () => {
     await expect(safeFetch(`${base}/loop`, { maxRedirects: 3 })).rejects.toThrow(/too_many_redirects/);
   });
 });
+
+describe('manual redirect observation',()=>{
+ it('returns the original redirect without following or treating it as an exhausted chain',async()=>{
+  const r=await safeFetch(`${base}/r1`,{followRedirects:false,maxRedirects:0});
+  expect(r.status).toBe(302);expect(r.headers.location).toBe('/r2');expect(r.redirects).toEqual([]);expect(r.finalUrl).toBe(`${base}/r1`);
+ });
+});

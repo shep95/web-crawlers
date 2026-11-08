@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { randomBytes } from "node:crypto";
+import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
@@ -7,7 +7,7 @@ import { DomainRun, normalizeTarget, scopeRootOf, verificationValue } from "../d
 import { liveNet, type IntelNet } from "../domain-intel/net.js";
 import { FAMILIES, RULES } from "../domain-intel/rules.js";
 
-const Q = z.object({ domain: z.string().trim().min(3).max(300), fresh: z.enum(["1", "true"]).optional() });
+const Q = z.object({ domain: z.string().trim().min(3).max(300), fresh: z.enum(["1", "true"]).optional(), validate: z.literal("1").optional() });
 
 /** HMAC secret for ownership tokens: DOMAIN_INTEL_SECRET, else a random value kept in the data directory. */
 function loadSecret(): string {
@@ -29,14 +29,16 @@ function loadSecret(): string {
  * Domain intelligence: the recursive cause-and-effect audit map applied to one domain.
  * Passive public observation for any domain; owner-verified checks only for owned roots.
  */
-export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: IntelNet; ownedRoots?: string[]; secret?: string; budgetMs?: number } = {}) {
+export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: IntelNet; ownedRoots?: string[]; secret?: string; budgetMs?: number; evidenceKey?: string } = {}) {
   const net = deps.net ?? liveNet;
   const owned = deps.ownedRoots ?? (process.env.DOMAIN_INTEL_OWNED ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const secret = deps.secret ?? loadSecret();
+  const evidenceKey = deps.evidenceKey ?? process.env.DOMAIN_INTEL_EVIDENCE_KEY;
+  const canReadSensitive = (supplied:unknown) => typeof supplied==='string' && !!evidenceKey && evidenceKey.length>=32 && timingSafeEqual(createHash('sha256').update(supplied).digest(),createHash('sha256').update(evidenceKey).digest());
   type Report = ReturnType<DomainRun["report"]>;
   const cache = new Map<string, { at: number; report: Promise<Report> }>();
   // Runs kept for continuation: each continue explores the next wave of the frontier.
-  const runs = new Map<string, { run: DomainRun; busy: boolean; client: string }>();
+  const runs = new Map<string, { run: DomainRun; busy: boolean; client: string; sensitive: boolean }>();
   const waveTimes = new Map<string, number[]>();
   const RUN_TTL = 60 * 60_000, MAX_RUNS = 40, WAVES_PER_HOUR = 600;
   const sweep = () => { for (const [id, r] of runs) if (Date.now() - r.run.lastUsed > RUN_TTL) runs.delete(id); while (runs.size > MAX_RUNS) runs.delete(runs.keys().next().value!); };
@@ -46,7 +48,7 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
 
   app.get("/api/v2/domain-intel/rules", async (_req, reply) => {
     reply.header("cache-control", "public, max-age=86400");
-    return { source: "docs/domain-cause-effect-map.txt", families: FAMILIES, rules: RULES };
+    return { source: "docs/domain-cause-effect-map.txt", validationVersion: 1, families: FAMILIES, rules: RULES };
   });
 
   app.get("/api/v2/domain-intel/verification", async (req, reply) => {
@@ -62,8 +64,15 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
     if (!r.success) return reply.code(400).send({ error: "INVALID_REQUEST", issues: r.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })) });
     const host = normalizeTarget(r.data.domain);
     if (!host) return reply.code(400).send({ error: "INVALID_DOMAIN", message: "Enter a public domain name such as example.org (no IP addresses, internal or reserved names)." });
-    const hit = cache.get(host);
-    if (hit && Date.now() - hit.at < TTL && !r.data.fresh) {
+    const suppliedKey=req.headers['x-void-evidence-key'];
+    const sensitive=canReadSensitive(suppliedKey);
+    if(suppliedKey&&!sensitive)return reply.code(403).send({error:'EVIDENCE_ACCESS_DENIED',message:'Private evidence access requires the operator audit key.'});
+    reply.header('cache-control','no-store');
+    const validate = r.data.validate === "1";
+    if (validate && !sensitive) return reply.code(403).send({error:"VALIDATION_KEY_REQUIRED",message:"Live validation requires the operator audit key."});
+    const cacheKey=host+(sensitive?'|private':'|public')+(validate?'|validation':'');
+    const hit = cache.get(cacheKey);
+    if (hit && Date.now() - hit.at < TTL && !r.data.fresh && !validate) {
       reply.header("x-domain-intel-cache", "hit");
       return hit.report;
     }
@@ -80,22 +89,25 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
     if (perClient.size > 5000) perClient.delete(perClient.keys().next().value!);
     running++;
     const report = (async () => {
-      const run = new DomainRun(host, { net, ownedRoots: owned, secret, budgetMs: deps.budgetMs });
+      const run = new DomainRun(host, { net, ownedRoots: owned, secret, sensitive, validate, budgetMs: deps.budgetMs });
       const total = deps.budgetMs ?? 45_000, t0 = Date.now();
       await run.init(Math.round(total * 0.5));
-      await run.wave(Math.max(1000, total - (Date.now() - t0)));
+      const remaining=total-(Date.now()-t0);
+      if(remaining>=30_000)await run.wave(remaining);
+      else if(sensitive&&remaining>0)await run.pageCrawler.wave(remaining);
       sweep();
-      runs.set(run.id, { run, busy: false, client });
+      runs.set(run.id, { run, busy: false, client, sensitive });
       return run.report();
     })().finally(() => running--);
-    cache.set(host, { at: Date.now(), report });
+    cache.set(cacheKey, { at: Date.now(), report });
     if (cache.size > 200) cache.delete(cache.keys().next().value!);
     try {
       const out = await report;
-      reply.header("cache-control", "private, max-age=300");
+      reply.header("cache-control", "no-store");
       return out;
     } catch (e) {
-      cache.delete(host);
+      cache.delete(cacheKey);
+      if ((e as Error).message === "VALIDATION_SCOPE_REQUIRED") return reply.code(403).send({error:"VALIDATION_SCOPE_REQUIRED",message:"Live validation requires operator-approved scope or DNS proof of control."});
       app.log.warn({ err: (e as Error).message, host }, "domain_intel_failed");
       return reply.code(502).send({ error: "DOMAIN_INTEL_FAILED", message: "The run could not complete. Try again shortly." });
     }
@@ -108,7 +120,9 @@ export function registerDomainIntelRoutes(app: FastifyInstance, deps: { net?: In
     sweep();
     const entry = runs.get(id);
     if (!entry) return reply.code(404).send({ error: "RUN_EXPIRED", message: "This run is no longer held (runs are kept for an hour). Start a new run." });
+    if(entry.sensitive&&!canReadSensitive(req.headers['x-void-evidence-key']))return reply.code(403).send({error:'EVIDENCE_ACCESS_DENIED'});
     if (entry.busy) return reply.code(409).header("retry-after", "5").send({ error: "WAVE_IN_PROGRESS", message: "A wave of this run is already in progress." });
+    reply.header("cache-control", "no-store");
     if (entry.run.frontier === 0) return entry.run.report();
     const times = (waveTimes.get(entry.client) ?? []).filter((t) => Date.now() - t < 3_600_000);
     if (times.length >= WAVES_PER_HOUR) return reply.code(429).header("retry-after", "300").send({ error: "RATE_LIMITED", message: `At most ${WAVES_PER_HOUR} waves per hour per client.` });

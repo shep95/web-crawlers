@@ -68,7 +68,7 @@ export const liveNet: IntelNet = {
     try {
       const res: SafeResponse = await safeFetch(url, {
         method: opts.method ?? "GET", maxBytes: opts.maxBytes ?? 768 * 1024, timeoutMs: opts.timeoutMs ?? 12_000,
-        maxRedirects: opts.follow === false ? 0 : 6, headers: opts.headers,
+        maxRedirects: opts.follow === false ? 0 : 6, followRedirects: opts.follow !== false, headers: opts.headers,
         userAgent: "VoidDomainIntel/1.0 (+https://github.com/shep95/web-crawlers; passive public observation)",
       });
       return { url, finalUrl: res.finalUrl, status: res.status, headers: res.headers, body: res.body.toString("utf8"), truncated: res.truncated, redirects: res.redirects, remoteAddress: res.remoteAddress, ms: Date.now() - t0, ...(opts.raw ? { bytes: res.body } : {}) };
